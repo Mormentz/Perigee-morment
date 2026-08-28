@@ -103,7 +103,7 @@ fn require_admin(env: &Env) -> Result<Address, Error> {
 
     let mut approvers: Vec<Address> = Vec::new(env);
     approvers.push_back(admin.clone());
-    EmergencyGuard::authorize(env.clone(), approvers).map_err(|_| Error::Unauthorized)?;
+    EmergencyGuard::check_multi_sig(env, &approvers).map_err(|_| Error::Unauthorized)?;
 
     Ok(admin)
 }
