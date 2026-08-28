@@ -311,18 +311,6 @@ impl EmergencyGuard {
             .instance()
             .set(&GuardDataKey::PauseState, &state);
 
-        emit_guard_event(
-            &env,
-            EmergencyGuardEvent {
-                action: EmergencyGuardAction::PauseSet,
-                admin: Some(admin.clone()),
-                operation,
-                paused,
-                threshold: Self::get_threshold(env.clone()),
-                admin_count: Self::get_admins(env.clone()).len(),
-                approver_count: 1,
-            },
-        );
         log!(
             &env,
             "Pause state updated: op={}, paused={}",
@@ -392,20 +380,6 @@ impl EmergencyGuard {
         if !admins.iter().any(|a| a == new_admin) {
             admins.push_back(new_admin.clone());
             env.storage().instance().set(&GuardDataKey::Admins, &admins);
-            emit_guard_event(
-                &env,
-                EmergencyGuardEvent {
-                    action: EmergencyGuardAction::AdminAdded,
-                    admin: Some(new_admin.clone()),
-                    operation: 0,
-                    paused: false,
-                    threshold: Self::get_threshold(env.clone()),
-                    admin_count: admins.len(),
-                    approver_count: approvers.len(),
-                },
-            );
-            emit_admin_added(&env, &approvers, &new_admin);
-            env.storage().instance().set(&GuardDataKey::Admins, &admins);
             emit_admin_added(&env, &approvers, &new_admin);
         }
         Ok(())
@@ -437,21 +411,6 @@ impl EmergencyGuard {
         }
 
         env.storage().instance().set(&GuardDataKey::Admins, &new_admins);
-        emit_guard_event(
-            &env,
-            EmergencyGuardEvent {
-                action: EmergencyGuardAction::AdminRemoved,
-                admin: Some(admin.clone()),
-                operation: 0,
-                paused: false,
-                threshold,
-                admin_count: new_admins.len(),
-                approver_count: approvers.len(),
-            },
-        );
-        env.storage()
-            .instance()
-            .set(&GuardDataKey::Admins, &new_admins);
         emit_admin_removed(&env, &approvers, &admin);
         Ok(())
     }
@@ -546,7 +505,7 @@ impl EmergencyGuard {
 
     /// Verify that `approvers` contains at least `threshold` distinct valid admins,
     /// each having provided their authorization.
-    pub(crate) fn check_multi_sig(env: &Env, approvers: &Vec<Address>) -> Result<(), GuardError> {
+    pub fn check_multi_sig(env: &Env, approvers: &Vec<Address>) -> Result<(), GuardError> {
         let threshold: u32 = env
             .storage()
             .instance()
