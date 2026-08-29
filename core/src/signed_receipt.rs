@@ -48,6 +48,12 @@ pub struct ReceiptVerifier {
     trusted_keys: Vec<Vec<u8>>,
 }
 
+impl Default for ReceiptVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReceiptVerifier {
     pub fn new() -> Self {
         Self {

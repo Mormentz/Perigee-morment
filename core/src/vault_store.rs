@@ -11,8 +11,8 @@ use axum::{
     extract::{Extension, Path, Query, State},
     Json,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
+use serde::Deserialize;
 use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -231,47 +231,47 @@ impl VaultStore {
             Err(other) => Err(VaultStoreError::Database(other)),
         }
     }
-}
 
-/// Fetch a vault regardless of deletion state. Used by the admin restore
-/// path and by the delete handler (which must check ownership of a vault
-/// that may already be soft-deleted).
-pub async fn get_including_deleted(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
-    self.vaults
-        .find_by_id_including_deleted(id)
-        .await
-        .map_err(VaultStoreError::Database)?
-        .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
-}
-
-/// Soft-delete a vault: stamp `deleted_at` without removing the row
-/// (BE-044 / issue #281). Idempotent for an already-deleted vault
-/// (`NotFound` if it does not exist).
-pub async fn soft_delete(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
-    let now = Utc::now();
-    let affected = self
-        .vaults
-        .soft_delete(id, now)
-        .await
-        .map_err(VaultStoreError::Database)?;
-    if affected == 0 {
-        return Err(VaultStoreError::NotFound(id.to_string()));
+    /// Fetch a vault regardless of deletion state. Used by the admin restore
+    /// path and by the delete handler (which must check ownership of a vault
+    /// that may already be soft-deleted).
+    pub async fn get_including_deleted(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+        self.vaults
+            .find_by_id_including_deleted(id)
+            .await
+            .map_err(VaultStoreError::Database)?
+            .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
     }
-    self.get_including_deleted(id).await
-}
 
-/// Restore a soft-deleted vault by clearing `deleted_at` (BE-044 / #281).
-pub async fn restore(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
-    let now = Utc::now();
-    let affected = self
-        .vaults
-        .restore(id, now)
-        .await
-        .map_err(VaultStoreError::Database)?;
-    if affected == 0 {
-        return Err(VaultStoreError::NotFound(id.to_string()));
+    /// Soft-delete a vault: stamp `deleted_at` without removing the row
+    /// (BE-044 / issue #281). Idempotent for an already-deleted vault
+    /// (`NotFound` if it does not exist).
+    pub async fn soft_delete(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+        let now = Utc::now();
+        let affected = self
+            .vaults
+            .soft_delete(id, now)
+            .await
+            .map_err(VaultStoreError::Database)?;
+        if affected == 0 {
+            return Err(VaultStoreError::NotFound(id.to_string()));
+        }
+        self.get_including_deleted(id).await
     }
-    self.get_including_deleted(id).await
+
+    /// Restore a soft-deleted vault by clearing `deleted_at` (BE-044 / #281).
+    pub async fn restore(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+        let now = Utc::now();
+        let affected = self
+            .vaults
+            .restore(id, now)
+            .await
+            .map_err(VaultStoreError::Database)?;
+        if affected == 0 {
+            return Err(VaultStoreError::NotFound(id.to_string()));
+        }
+        self.get_including_deleted(id).await
+    }
 }
 
 /// Verify that `manager_id` (UUID) belongs to the authenticated Stellar address.

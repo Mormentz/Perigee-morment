@@ -4,8 +4,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use std::sync::Arc;
 use thiserror::Error;
 use utoipa::ToSchema;

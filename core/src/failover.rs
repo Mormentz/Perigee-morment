@@ -18,6 +18,12 @@ pub struct FailoverEvent {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+impl Default for FailoverManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FailoverManager {
     pub fn new() -> Self {
         Self {

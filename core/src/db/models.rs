@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use utoipa::ToSchema;
-use uuid::Uuid;
 
 // ── Pagination ────────────────────────────────────────────────────────────────
 
@@ -182,7 +181,7 @@ pub struct ReconcileResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ListReportsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
