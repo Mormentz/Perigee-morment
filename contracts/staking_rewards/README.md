@@ -26,9 +26,17 @@ Updates accrued rewards, resets claimable rewards to zero, and transfers reward 
 
 Transfers all staked principal back to `user` and deletes the user's staking state, forfeiting any accrued rewards. Requires `user` auth. This path is available while paused.
 
+`pause_staking() -> Result<(), ContractError>`
+
+Owner-only. Sets the EmergencyGuard `STAKE` pause bit. While set, `stake`, `withdraw`, and `claim` fail with `Paused`; `emergency_withdraw` remains available.
+
+`resume_staking() -> Result<(), ContractError>`
+
+Owner-only. Clears the EmergencyGuard `STAKE` pause bit and restores stake, withdraw, and claim.
+
 `set_paused(paused) -> Result<(), ContractError>`
 
-Owner-only circuit breaker. When paused, `stake`, `withdraw`, and `claim` fail with `Paused`; `emergency_withdraw` remains available.
+Owner-only convenience wrapper. `true` calls `pause_staking`; `false` calls `resume_staking`.
 
 ## Read API
 
@@ -58,7 +66,11 @@ Returns the full staking configuration.
 
 `emergency_withdraw`: publishes `EmergencyWithdrawEvent { user, amount }`.
 
-`set_paused`: publishes `PausedEvent { paused }`.
+`pause_staking`: publishes `PausedEvent { paused: true }`.
+
+`resume_staking`: publishes `PausedEvent { paused: false }`.
+
+`set_paused`: delegates to `pause_staking` or `resume_staking` and publishes the corresponding event.
 
 ## Error Codes
 

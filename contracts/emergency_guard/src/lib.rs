@@ -2,7 +2,7 @@
 
 #[cfg(feature = "contract")]
 use soroban_sdk::{contract, contractimpl};
-use soroban_sdk::{contracterror, contracttype, Address, Env, String, Vec};
+use soroban_sdk::{contracterror, contracttype, log, Address, Env, String, Vec};
 
 /// Granular pause types using bitmask for efficient storage
 #[contracttype]
@@ -19,6 +19,8 @@ impl PauseType {
     pub const CREATE_PAIR: u32 = 1 << 6;
     /// Pause staking operations
     pub const STAKE: u32 = 1 << 7;
+    /// Pause claim-rewards independently of staking
+    pub const CLAIM_REWARDS: u32 = 1 << 8;
 
     pub fn new(value: u32) -> Self {
         PauseType(value)
@@ -446,6 +448,7 @@ impl EmergencyGuard {
 
         new_admins.push_back(new_admin.clone());
 
+        let threshold = Self::get_threshold(env.clone());
         if (new_admins.len() as u32) < threshold {
             return Err(GuardError::InvalidThreshold);
         }
@@ -492,8 +495,10 @@ impl EmergencyGuard {
     pub fn validate_multi_sig(env: Env, approvers: Vec<Address>) -> Result<(), GuardError> {
         Self::check_multi_sig(&env, &approvers)
     }
+}
 
-    // ── Internal helpers ──────────────────────────────────────────────────────
+impl EmergencyGuard {
+    // ── Internal helpers (not contract exports — signatures use references) ──
 
     fn is_admin_internal(env: &Env, addr: &Address) -> bool {
         let admins: Vec<Address> = env
