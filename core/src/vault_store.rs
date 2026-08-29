@@ -324,6 +324,10 @@ pub struct ListVaultsQuery {
         (status = 200, description = "Paginated list of vaults for the manager", body = PagedResponse<VaultRecord>),
         (status = 401, description = "Unauthorized")
     ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
+    ),
     tag = "Vaults"
 )]
 pub async fn list_vaults_handler(
@@ -349,7 +353,12 @@ pub async fn list_vaults_handler(
     request_body = CreateVaultRequest,
     responses(
         (status = 200, description = "Vault created", body = VaultRecord),
-        (status = 400, description = "Invalid request")
+        (status = 400, description = "Invalid request"),
+        (status = 401, description = "Unauthorized")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
@@ -384,7 +393,12 @@ pub async fn create_vault_handler(
     params(("id" = String, Path, description = "Vault ID")),
     responses(
         (status = 200, description = "Vault record", body = VaultRecord),
+        (status = 401, description = "Unauthorized"),
         (status = 404, description = "Vault not found")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
@@ -405,8 +419,13 @@ pub async fn get_vault_handler(
     request_body = UpdateVaultRequest,
     responses(
         (status = 200, description = "Vault updated (version bumped)", body = VaultRecord),
+        (status = 401, description = "Unauthorized"),
         (status = 404, description = "Vault not found"),
         (status = 409, description = "Optimistic lock conflict — reload and retry")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
@@ -461,7 +480,12 @@ fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
     params(("id" = String, Path, description = "Vault ID")),
     responses(
         (status = 200, description = "Vault soft-deleted", body = VaultRecord),
+        (status = 401, description = "Unauthorized"),
         (status = 404, description = "Vault not found")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
@@ -485,8 +509,13 @@ pub async fn soft_delete_vault_handler(
     params(("id" = String, Path, description = "Vault ID")),
     responses(
         (status = 200, description = "Vault restored", body = VaultRecord),
+        (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin privileges required"),
         (status = 404, description = "Vault not found")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
@@ -521,7 +550,12 @@ pub struct ListDeletedVaultsQuery {
     ),
     responses(
         (status = 200, description = "Paginated list of soft-deleted vaults", body = PagedResponse<VaultRecord>),
+        (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin privileges required")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Vaults"
 )]
