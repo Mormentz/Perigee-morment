@@ -2415,14 +2415,7 @@ async fn main() {
         )
         .route_layer(axum::middleware::from_fn(auth::auth_middleware));
 
-    let app = Router::new()
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .route(
-            "/",
-            get(|| async {
-                "Hello from Perigee! Usage: cargo run -p Perigee-core -- benchmark"
-            }),
-        )
+    let api_routes = Router::new()
         .route("/health", get(health_check))
         .route("/ready", get(ready_check))
         .route("/metrics", get(metrics_handler))
@@ -2468,7 +2461,18 @@ async fn main() {
         // WebSocket streaming (Issue #105) — no auth required on the upgrade;
         // the client passes the job_id in the path.
         .route("/ws/jobs/:job_id", get(ws::ws_handler))
-        .merge(protected)
+        .merge(protected);
+
+    let app = Router::new()
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route(
+            "/",
+            get(|| async {
+                "Hello from Perigee! Usage: cargo run -p Perigee-core -- benchmark"
+            }),
+        )
+        .nest("/v1", api_routes.clone())
+        .merge(api_routes)
         // Catch-all fallback: return a structured JSON 404 instead of
         // axum's default plain-text body, which could expose framework
         // version strings or routing internals.
@@ -2480,6 +2484,9 @@ async fn main() {
         ))
         .layer(axum::middleware::from_fn(
             crate::middleware::correlation_id_middleware,
+        ))
+        .layer(axum::middleware::from_fn(
+            crate::middleware::api_version_middleware,
         ))
         .layer(TraceLayer::new_for_http())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit

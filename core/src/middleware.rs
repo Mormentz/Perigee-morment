@@ -268,3 +268,195 @@ pub async fn method_not_allowed_middleware(request: Request, next: Next) -> Resp
 
     response
 }
+
+// ── API Versioning Middleware ──────────────────────────────────────────────────
+
+pub const DEFAULT_API_VERSION: &str = "v1";
+pub const SUPPORTED_API_VERSIONS: &[&str] = &["v1", "1"];
+pub const API_VERSION_HEADER: &str = "x-api-version";
+pub const ACCEPT_VERSION_HEADER: &str = "accept-version";
+pub const ALT_API_VERSION_HEADER: &str = "api-version";
+
+/// Extracts and validates the requested API version from the URI path or headers.
+///
+/// Version resolution priority:
+/// 1. URI path prefix (e.g. `/v1/...` -> `"v1"`, `/v2/...` -> `"v2"`)
+/// 2. Header `X-API-Version`
+/// 3. Header `Accept-Version`
+/// 4. Header `Api-Version`
+/// 5. Header `Accept` parameter (e.g. `version=1` or `vnd.perigee.v1`)
+/// 6. Default to `DEFAULT_API_VERSION` ("v1")
+pub async fn api_version_middleware(request: Request, next: Next) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    let path = request.uri().path().to_string();
+
+    // Determine requested version
+    let mut requested_version: Option<String> = None;
+
+    // Check URI prefix (e.g. /v1/... or /v2/...)
+    if path.starts_with("/v") {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(first_segment) = segments.first() {
+            if first_segment.starts_with('v') && first_segment[1..].chars().all(|c| c.is_ascii_digit()) {
+                requested_version = Some(first_segment.to_string());
+            }
+        }
+    }
+
+    // Check headers if no URI version prefix found
+    if requested_version.is_none() {
+        if let Some(val) = request.headers().get(API_VERSION_HEADER).and_then(|h| h.to_str().ok()) {
+            requested_version = Some(val.trim().to_string());
+        } else if let Some(val) = request.headers().get(ACCEPT_VERSION_HEADER).and_then(|h| h.to_str().ok()) {
+            requested_version = Some(val.trim().to_string());
+        } else if let Some(val) = request.headers().get(ALT_API_VERSION_HEADER).and_then(|h| h.to_str().ok()) {
+            requested_version = Some(val.trim().to_string());
+        } else if let Some(val) = request.headers().get("accept").and_then(|h| h.to_str().ok()) {
+            if val.contains("vnd.perigee.v1") || val.contains("version=1") || val.contains("version=v1") {
+                requested_version = Some("v1".to_string());
+            } else if val.contains("vnd.perigee.v") {
+                if let Some(pos) = val.find("vnd.perigee.v") {
+                    let sub = &val[pos + 12..];
+                    let ver: String = sub.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                    if !ver.is_empty() {
+                        requested_version = Some(format!("v{}", ver));
+                    }
+                }
+            }
+        }
+    }
+
+    let version = requested_version.unwrap_or_else(|| DEFAULT_API_VERSION.to_string());
+    let normalized = version.trim().to_lowercase();
+
+    // Check if supported
+    let is_supported = SUPPORTED_API_VERSIONS.iter().any(|&v| v == normalized || format!("v{}", v) == normalized);
+
+    if !is_supported {
+        tracing::warn!(
+            version = %version,
+            path = %path,
+            "Unsupported API version requested"
+        );
+
+        let body = Json(serde_json::json!({
+            "error": "UNSUPPORTED_API_VERSION",
+            "message": format!(
+                "API version '{}' is not supported. Supported versions: {}",
+                version,
+                SUPPORTED_API_VERSIONS.join(", ")
+            )
+        }));
+
+        let mut res = (StatusCode::BAD_REQUEST, body).into_response();
+        res.headers_mut().insert(
+            HeaderName::from_static(API_VERSION_HEADER),
+            HeaderValue::from_static("v1"),
+        );
+        return res;
+    }
+
+    let mut response = next.run(request).await;
+
+    response.headers_mut().insert(
+        HeaderName::from_static(API_VERSION_HEADER),
+        HeaderValue::from_static("v1"),
+    );
+
+    response
+}
+
+#[cfg(test)]
+mod version_middleware_tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    async fn test_app() -> Router {
+        Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .nest("/v1", Router::new().route("/health", get(|| async { "ok" })))
+            .layer(axum::middleware::from_fn(api_version_middleware))
+    }
+
+    #[tokio::test]
+    async fn test_default_version_header() {
+        let app = test_app().await;
+        let req = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("x-api-version").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_uri_v1_version() {
+        let app = test_app().await;
+        let req = Request::builder().uri("/v1/health").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("x-api-version").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_header_v1_version() {
+        let app = test_app().await;
+        let req = Request::builder()
+            .uri("/health")
+            .header("x-api-version", "v1")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get("x-api-version").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_uri_version() {
+        let app = test_app().await;
+        let req = Request::builder().uri("/v2/health").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            res.headers().get("x-api-version").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_header_version() {
+        let app = test_app().await;
+        let req = Request::builder()
+            .uri("/health")
+            .header("x-api-version", "v2")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            res.headers().get("x-api-version").unwrap().to_str().unwrap(),
+            "v1"
+        );
+    }
+}
