@@ -36,15 +36,17 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
+use jsonwebtoken::{decode, Algorithm, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+use crate::auth::Claims;
 use crate::jobs::JobId;
 
 // ── Channel capacity ─────────────────────────────────────────────────────────
@@ -272,6 +274,11 @@ impl Default for SimulationBus {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WsQueryParams {
+    token: Option<String>,
+}
+
 // ── Axum extractor alias ─────────────────────────────────────────────────────
 
 /// Shared state slice required by the WebSocket handler.
@@ -290,9 +297,32 @@ pub struct WsState {
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(job_id): Path<String>,
+    Query(params): Query<WsQueryParams>,
     State(state): State<Arc<crate::AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, job_id, state))
+    // Validate JWT token before accepting WebSocket connection
+    let token = match params.token {
+        Some(t) => t,
+        None => {
+            return (axum::http::StatusCode::UNAUTHORIZED, "Missing token query parameter").into_response();
+        }
+    };
+
+    let validation = Validation::new(Algorithm::RS256);
+    match decode::<Claims>(&token, &state.auth.decoding_key, &validation) {
+        Ok(token_data) => {
+            // Check that the token has at least read permissions (we can expand this later if needed)
+            if !token_data.claims.scopes.contains(&"simulate".to_string()) {
+                return (axum::http::StatusCode::UNAUTHORIZED, "Insufficient permissions").into_response();
+            }
+            // If valid, proceed with upgrade
+            ws.on_upgrade(move |socket| handle_socket(socket, job_id, state))
+        },
+        Err(e) => {
+            tracing::warn!("Invalid WebSocket token: {}", e);
+            (axum::http::StatusCode::UNAUTHORIZED, "Invalid token").into_response()
+        }
+    }
 }
 
 async fn handle_socket(mut socket: WebSocket, job_id: String, state: Arc<crate::AppState>) {

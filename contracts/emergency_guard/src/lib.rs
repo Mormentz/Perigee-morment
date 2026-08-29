@@ -380,6 +380,11 @@ impl EmergencyGuard {
         Ok(())
     }
 
+    /// Check if an address is an admin.
+    pub fn is_admin_public(env: Env, addr: Address) -> bool {
+        Self::is_admin_internal(&env, &addr)
+    }
+
     /// Add new admin (multi-sig required).
     pub fn add_admin(
         env: Env,
@@ -522,10 +527,7 @@ impl EmergencyGuard {
             .unwrap_or(0)
     }
 
-    /// Check if an address is an admin.
-    pub fn is_admin_public(env: Env, addr: Address) -> bool {
-        Self::is_admin_internal(&env, &addr)
-    }
+
 
     /// Public wrapper to validate approvers against the stored threshold.
     pub fn validate_multi_sig(env: Env, approvers: Vec<Address>) -> Result<(), GuardError> {
