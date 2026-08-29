@@ -19,6 +19,7 @@
 //! | `simulation_latency_seconds` | Histogram | `endpoint` | Simulation-specific latency |
 //! | `resource_utilization_percent` | Gauge | `resource` | Latest resource-utilisation sample |
 //! | `perigee_shielded_rail_fallback_total` | Counter | — | Settlements that fell back from the shielded tokenless rail to the transparent rail (BE-028) |
+//! | `security_audit_events_total` | Counter | `event`, `status` | Security audit events and monitoring (Issue #398) |
 
 use prometheus::{
     opts, register_gauge_vec_with_registry, register_histogram_vec_with_registry,
@@ -74,6 +75,10 @@ pub struct Metrics {
     /// Number of settlements that fell back from the shielded tokenless rail
     /// to the transparent rail (shielded rail unavailable or timed out).
     pub shielded_rail_fallback_total: IntCounter,
+
+    // ── Security Audit & Monitoring (Issue #398) ─────────────────────────
+    /// Total security audit events recorded, labelled by event type and status.
+    pub security_audit_events_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -179,6 +184,15 @@ impl Metrics {
             registry
         )?;
 
+        let security_audit_events_total = register_int_counter_vec_with_registry!(
+            opts!(
+                "security_audit_events_total",
+                "Total security-sensitive events recorded, labelled by event and status."
+            ),
+            &["event", "status"],
+            registry
+        )?;
+
         Ok(Arc::new(Self {
             registry,
             http_requests_total,
@@ -191,6 +205,7 @@ impl Metrics {
             simulation_latency_seconds,
             resource_utilization_percent,
             shielded_rail_fallback_total,
+            security_audit_events_total,
         }))
     }
 
