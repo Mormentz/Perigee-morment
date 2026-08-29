@@ -30,6 +30,17 @@ Transfers all staked principal back to `user` and deletes the user's staking sta
 
 Owner-only circuit breaker. When paused, `stake`, `withdraw`, and `claim` fail with `Paused`; `emergency_withdraw` remains available.
 
+### Canonical guard API
+
+This contract standardizes on `DefaultEmergencyGuard` as the single source of truth for pause checks and state changes. The canonical calls are:
+
+- `DefaultEmergencyGuard::check_not_paused(&env, PauseType::STAKE)`
+- `DefaultEmergencyGuard::check_not_paused(&env, PauseType::CLAIM_REWARDS)`
+- `DefaultEmergencyGuard::set_pause_state(&env, PauseType::STAKE, paused)`
+- `DefaultEmergencyGuard::set_pause_state(&env, PauseType::CLAIM_REWARDS, paused)`
+
+Any direct calls to `EmergencyGuard::*` for these checks are intentionally avoided to keep the pause semantics consistent and auditable.
+
 ## Read API
 
 `get_staked_balance(user) -> i128`

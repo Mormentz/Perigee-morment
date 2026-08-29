@@ -1,10 +1,9 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec, vec};
 
-use emergency_guard::{EmergencyGuard, PauseType};
 pub use Perigee_error_codes::ContractError;
 use Perigee_math::Fixed;
-use emergency_guard::{DefaultEmergencyGuard, PauseType, EmergencyGuardTrait};
+use emergency_guard::{DefaultEmergencyGuard, PauseType};
 
 pub const SCALE: i128 = 1_000_000_000_000_000_000; // 18 decimals
 
@@ -214,7 +213,11 @@ pub struct StakingRewards;
 
 #[contractimpl]
 impl StakingRewards {
-    /// Initializes the staking rewards contract with the config.
+    /// Canonical emergency guard API used throughout this contract:
+    /// `DefaultEmergencyGuard::check_not_paused(...)` and
+    /// `DefaultEmergencyGuard::set_pause_state(...)`.
+    /// Contract code should not bypass this guard with the lower-level
+    /// `EmergencyGuard::*` methods.
     pub fn initialize(
         e: Env,
         owner: Address,
@@ -250,24 +253,20 @@ impl StakingRewards {
         e.storage().instance().set(&DataKey::TotalStaked, &0i128);
         e.storage().instance().extend_ttl(10000, 10000);
 
-        // Initialize emergency guard with single admin and threshold of 1
         let admins = vec![&e, owner.clone()];
         DefaultEmergencyGuard::init_guard(&e, admins, 1)
             .map_err(|_| ContractError::AlreadyInitialized)?;
-        // Initialize the embedded EmergencyGuard so granular pause checks
-        // (e.g. PauseType::CLAIM_REWARDS) can be toggled by the owner.
-        // Threshold of 1 means the single owner can trigger any pause.
-        let admins = soroban_sdk::vec![&e, config.owner.clone()];
-        EmergencyGuard::initialize(e, admins, 1).map_err(|_| ContractError::AlreadyInitialized)?;
 
         Ok(())
     }
 
+    fn ensure_not_paused(e: &Env, operation: u32) -> Result<(), ContractError> {
+        DefaultEmergencyGuard::check_not_paused(e, operation).map_err(|_| ContractError::Paused)
+    }
+
     /// Stakes primary tokens in the contract.
     pub fn stake(e: Env, user: Address, amount: i128) -> Result<(), ContractError> {
-        // Check if staking is paused using granular pause control
-        DefaultEmergencyGuard::check_not_paused(&e, PauseType::STAKE)
-            .map_err(|_| ContractError::Paused)?;
+        Self::ensure_not_paused(&e, PauseType::STAKE)?;
 
         if amount <= 0 {
             return Err(ContractError::InvalidInput);
@@ -278,7 +277,6 @@ impl StakingRewards {
         let config = Self::get_config(e.clone())?;
         let mut state = Self::update_user_rewards_internal(&e, &config, &user)?;
 
-        // Transfer staking tokens from user to contract
         token::Client::new(&e, &config.staking_token).transfer(
             &user,
             &e.current_contract_address(),
@@ -290,7 +288,6 @@ impl StakingRewards {
             .checked_add(amount)
             .ok_or(ContractError::Overflow)?;
 
-        // Update total staked
         let mut total_staked: i128 = e
             .storage()
             .instance()
@@ -321,9 +318,7 @@ impl StakingRewards {
 
     /// Withdraws staked principal tokens.
     pub fn withdraw(e: Env, user: Address, amount: i128) -> Result<(), ContractError> {
-        // Check if staking is paused using granular pause control
-        DefaultEmergencyGuard::check_not_paused(&e, PauseType::STAKE)
-            .map_err(|_| ContractError::Paused)?;
+        Self::ensure_not_paused(&e, PauseType::STAKE)?;
 
         if amount <= 0 {
             return Err(ContractError::InvalidInput);
@@ -343,7 +338,6 @@ impl StakingRewards {
             .checked_sub(amount)
             .ok_or(ContractError::Overflow)?;
 
-        // Update total staked
         let mut total_staked: i128 = e
             .storage()
             .instance()
@@ -370,7 +364,6 @@ impl StakingRewards {
         }
         e.storage().instance().extend_ttl(10000, 10000);
 
-        // Transfer staking tokens back to user
         token::Client::new(&e, &config.staking_token).transfer(
             &e.current_contract_address(),
             &user,
@@ -387,13 +380,8 @@ impl StakingRewards {
 
     /// Claims accrued rewards.
     pub fn claim(e: Env, user: Address) -> Result<i128, ContractError> {
-        // Check if staking is paused using granular pause control
-        DefaultEmergencyGuard::check_not_paused(&e, PauseType::STAKE)
-            .map_err(|_| ContractError::Paused)?;
-
-        if EmergencyGuard::is_paused(e.clone(), PauseType::CLAIM_REWARDS) {
-            return Err(ContractError::Paused);
-        }
+        Self::ensure_not_paused(&e, PauseType::STAKE)?;
+        Self::ensure_not_paused(&e, PauseType::CLAIM_REWARDS)?;
 
         user.require_auth();
 
@@ -421,7 +409,6 @@ impl StakingRewards {
         }
         e.storage().instance().extend_ttl(10000, 10000);
 
-        // Transfer reward tokens to user
         token::Client::new(&e, &config.reward_token).transfer(
             &e.current_contract_address(),
             &user,
@@ -493,39 +480,30 @@ impl StakingRewards {
         Ok(staked_amount)
     }
 
-    /// Pause staking operations (admin only).
+    /// Pause staking operations (owner only).
     pub fn pause_staking(e: Env) -> Result<(), ContractError> {
-        let config = Self::get_config(e.clone())?;
-    /// Sets the global paused state (owner only).
+        Self::set_paused(e, true)
+    }
+
+    /// Sets the staking pause bit (owner only).
     pub fn set_paused(e: Env, paused: bool) -> Result<(), ContractError> {
-        let mut config = Self::get_config(e.clone())?;
+        let config = Self::get_config(e.clone())?;
         config.owner.require_auth();
 
-        DefaultEmergencyGuard::set_pause_state(&e, PauseType::STAKE, true)
+        DefaultEmergencyGuard::set_pause_state(&e, PauseType::STAKE, paused)
             .map_err(|_| ContractError::Paused)?;
 
         e.events().publish(
             (String::from_str(&e, "pause_staking"),),
-            PausedEvent { paused: true },
+            PausedEvent { paused },
         );
 
         Ok(())
     }
 
-    /// Resume staking operations (admin only).
+    /// Resume staking operations (owner only).
     pub fn resume_staking(e: Env) -> Result<(), ContractError> {
-        let config = Self::get_config(e.clone())?;
-        config.owner.require_auth();
-
-        DefaultEmergencyGuard::set_pause_state(&e, PauseType::STAKE, false)
-            .map_err(|_| ContractError::Paused)?;
-
-        e.events().publish(
-            (String::from_str(&e, "resume_staking"),),
-            PausedEvent { paused: false },
-        );
-
-        Ok(())
+        Self::set_paused(e, false)
     }
 
     /// Emergency pause all operations (requires multi-sig approval).
@@ -589,18 +567,26 @@ impl StakingRewards {
     }
 
     /// Rotate admin (multi-sig required).
-    pub fn rotate_admin(e: Env, approvers: Vec<Address>, old_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+    pub fn rotate_admin(
+        e: Env,
+        approvers: Vec<Address>,
+        old_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
         DefaultEmergencyGuard::rotate_admin(&e, approvers, old_admin, new_admin)
+            .map_err(|_| ContractError::Paused)
+    }
+
     /// Granularly pause or unpause the claim_rewards operation (owner only).
-    /// This is independent of the global `is_paused` flag and uses the
-    /// embedded EmergencyGuard bitmask (PauseType::CLAIM_REWARDS).
+    /// This uses the same default guard bitmask as all other staking pause checks.
     pub fn set_claim_rewards_paused(e: Env, paused: bool) -> Result<(), ContractError> {
         let config = Self::get_config(e.clone())?;
-        // `EmergencyGuard::set_pause` performs the ownership auth check itself,
-        // so we pass the owner through directly to avoid double-auth failures
-        // when the same signer is reused within the same transaction.
-        EmergencyGuard::set_pause(e, config.owner, PauseType::CLAIM_REWARDS, paused)
-            .map_err(|_| ContractError::Paused)
+        config.owner.require_auth();
+
+        DefaultEmergencyGuard::set_pause_state(&e, PauseType::CLAIM_REWARDS, paused)
+            .map_err(|_| ContractError::Paused)?;
+
+        Ok(())
     }
 
     // ── View Functions ──────────────────────────────────────────
