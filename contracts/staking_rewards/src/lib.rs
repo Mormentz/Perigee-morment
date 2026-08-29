@@ -1,10 +1,9 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec, vec};
 
-use emergency_guard::{EmergencyGuard, PauseType};
+use emergency_guard::{DefaultEmergencyGuard, EmergencyGuard, EmergencyGuardTrait, PauseType};
 pub use Perigee_error_codes::ContractError;
 use Perigee_math::Fixed;
-use emergency_guard::{DefaultEmergencyGuard, PauseType, EmergencyGuardTrait};
 
 pub const SCALE: i128 = 1_000_000_000_000_000_000; // 18 decimals
 
@@ -254,11 +253,6 @@ impl StakingRewards {
         let admins = vec![&e, owner.clone()];
         DefaultEmergencyGuard::init_guard(&e, admins, 1)
             .map_err(|_| ContractError::AlreadyInitialized)?;
-        // Initialize the embedded EmergencyGuard so granular pause checks
-        // (e.g. PauseType::CLAIM_REWARDS) can be toggled by the owner.
-        // Threshold of 1 means the single owner can trigger any pause.
-        let admins = soroban_sdk::vec![&e, config.owner.clone()];
-        EmergencyGuard::initialize(e, admins, 1).map_err(|_| ContractError::AlreadyInitialized)?;
 
         Ok(())
     }
