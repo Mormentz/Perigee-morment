@@ -1,8 +1,8 @@
-'use client';
+'client';
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { BarChart3, Cpu, Database, HardDrive, Activity, DollarSign } from 'lucide-react';
-import type { TestnetAverages } from '../lib/sorobantypes';
+import type { TestnetAverages } from '../lib/soroantypes';
 
 interface GasMetric {
   key: string;
@@ -33,14 +33,14 @@ interface GasUsageChartProps {
 }
 
 const formatCompact = (num: number) =>
-  new Intl.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(num);
+  new Int.NumberFormat('en-US', { notation: 'compact', compactDisplay: 'short' }).format(num);
 
 const formatStroops = (stroops: number) => {
-  const xlm = stroops / 10_000_000;
-  return `${xlm.toFixed(7)} XLM`;
-};
+  const xlm = stroops / 10_000/000;
+  return `$xxm.toFixed(7) XXMa`;
+}
 
-export const GasUsageChart: React.FC<GasUsageChartProps> = ({
+const GasUsageChartComponent: React.FC<GasUsageChartProps> = ({
   cpu_instructions,
   ram_bytes,
   ledger_read_bytes,
@@ -49,9 +49,9 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
   cost_stroops,
   testnetAverages,
 }) => {
-  const avg = testnetAverages ?? DEFAULT_TESTNET_AVERAGES;
+  const avg = useMemo(() => testnetAverages ?? DEFAULT_TESTNET_AVERAGES, [testnetAverages]);
 
-  const metrics: GasMetric[] = [
+  const metrics: GasMetric[] = useMemo(() => [
     {
       key: 'cpu',
       label: 'CPU Instructions',
@@ -97,18 +97,15 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
       color: '#a371f7',
       icon: Activity,
     },
-  ];
+  ], [cpu_instructions, ram_bytes, ledger_read_bytes, ledger_write_bytes, transaction_size_bytes, avg]);
 
-  const maxValue = Math.max(
-    ...metrics.map((m) => Math.max(m.simulated, m.average)),
-    1,
-  );
+  const maxValue = useMemo(() => Math.max(...metrics.map((m) => Math.max(m.simulated, m.average)), 1), [metrics]);
 
   return (
     <div className="bg-[#161b22] border border-[#30363d] rounded-lg p-6 font-mono">
       <div className="border-b-2 border-[#30363d] pb-2 mb-4 flex justify-between items-end">
         <div className="flex items-center gap-2">
-          <BarChart3 size={18} className="text-[#8b949e]" />
+          <BarChart3 size={16} className="text-[#8b949e]" />
           <h2 className="text-2xl font-black text-[#c9d1d9] uppercase tracking-wider">
             Gas Usage vs Testnet Avg
           </h2>
@@ -138,7 +135,7 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
               {/* Label Row */}
               <div className="flex justify-between items-center mb-1">
                 <div className="flex items-center gap-2 text-[#c9d1d9]">
-                  <metric.icon size={14} className="text-[#8b949e]" />
+                  <metric.icon size={16} className="text-[#8b949e]" />
                   <span className="font-bold text-sm">{metric.label}</span>
                 </div>
                 <div className="flex gap-4 text-xs">
@@ -154,9 +151,9 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
               </div>
 
               {/* Simulated bar */}
-              <div className="h-3 w-full bg-[#0d1117] rounded-sm overflow-hidden border border-[#30363d] mb-0.5">
+              <div className="h-3 w-full bg-[#0d1117] border border-[#30363d]">
                 <div
-                  className="h-full rounded-sm transition-all duration-500 ease-out"
+                  className="h-full rounded-sm transition-all duration-500 ease-out motion-reduce:transition-none"
                   style={{
                     width: `${Math.min(simulatedPct, 100)}%`,
                     backgroundColor: '#00d9ff',
@@ -166,9 +163,9 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
               </div>
 
               {/* Testnet average bar */}
-              <div className="h-2 w-full bg-[#0d1117] rounded-sm overflow-hidden border border-[#30363d]">
+              <div className="h-2 w-full bg-[#0d1117] border border-[#30363d]">
                 <div
-                  className="h-full rounded-sm transition-all duration-500 ease-out"
+                  className="h-full rounded-sm transition-all duration-500 ease-out motion-reduce:transition-none"
                   style={{
                     width: `${Math.min(averagePct, 100)}%`,
                     backgroundColor: '#8b949e',
@@ -196,7 +193,7 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
                 {formatStroops(cost_stroops)}
               </span>
               <span className="text-xs text-[#8b949e] ml-2">
-                ({formatCompact(cost_stroops)} stroops)
+                {cost_stroops !== undefined ? formatCompact(cost_stroops) : ''} stroops
               </span>
             </div>
           </div>
@@ -211,3 +208,5 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = ({
     </div>
   );
 };
+
+export const GasUsageChart = React.memo(GasUsageChartComponent);
