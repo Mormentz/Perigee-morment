@@ -230,7 +230,6 @@ pub fn emit_admin_removed(e: &Env, approvers: &Vec<Address>, admin: &Address) {
     );
 }
 
-#[contract]
 #[cfg_attr(feature = "contract", contract)]
 pub struct EmergencyGuard;
 
@@ -578,11 +577,6 @@ impl EmergencyGuard {
             Ok(())
         }
     }
-
-    /// Public method to check if an address is an admin
-    pub fn is_admin_public(env: Env, addr: Address) -> bool {
-        Self::is_admin_internal(&env, &addr)
-    }
 }
 
 /// Standard emergency-guard surface for host contracts embedding `EmergencyGuard` storage.
@@ -605,7 +599,7 @@ pub trait EmergencyGuardTrait {
     ) -> Result<(), GuardError>;
     fn get_admins(env: &Env) -> Vec<Address>;
     fn get_threshold(env: &Env) -> u32;
-    fn is_admin(env: &Env, addr: Address) -> bool;
+    fn is_admin(env: &Env, addr: &Address) -> bool;
 }
 
 /// Default implementation of EmergencyGuardTrait using static methods
@@ -831,46 +825,6 @@ impl EmergencyGuardTrait for DefaultEmergencyGuard {
         env.storage().instance().set(&GuardDataKey::Admins, &new_admins);
         log!(env, "Admin rotated: {} to {}", old_admin, new_admin);
         Ok(())
-    }
-}
-
-/// Extension methods for unpause operations
-impl DefaultEmergencyGuard {
-    /// Unpause a specific operation (uses set_pause_state internally)
-    pub fn unpause(env: &Env, operation: u32) -> Result<(), GuardError> {
-        Self::set_pause_state(env, operation, false)
-    }
-
-    /// Unpause all operations (single-admin helper; same effect as `unpause_all`)
-    pub fn unpause_all_emergency(env: &Env) -> Result<(), GuardError> {
-        let pause_state = PauseType::new(0);
-        env.storage()
-            .instance()
-            .set(&GuardDataKey::PauseState, &pause_state);
-
-        log!(env, "All operations unpaused");
-        Ok(())
-    }
-
-    /// Check if a specific operation is paused
-    pub fn is_operation_paused(env: &Env, operation: u32) -> bool {
-        let pause_state: PauseType = env
-            .storage()
-            .instance()
-            .get(&GuardDataKey::PauseState)
-            .unwrap_or(PauseType::new(0));
-
-        pause_state.is_paused(operation)
-    }
-
-    /// Pause a specific operation
-    pub fn pause(env: &Env, operation: u32) -> Result<(), GuardError> {
-        Self::set_pause_state(env, operation, true)
-    }
-
-    /// Public wrapper to validate a set of approvers against the stored threshold.
-    pub fn validate_multi_sig(env: Env, approvers: Vec<Address>) -> Result<(), GuardError> {
-        EmergencyGuard::check_multi_sig(&env, &approvers)
     }
 }
 
