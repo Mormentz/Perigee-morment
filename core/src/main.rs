@@ -1001,6 +1001,7 @@ fn to_report(
         (status = 500, description = "Analysis failed")
     ),
     security(
+        ("bearerAuth" = []),
         ("jwt" = [])
     ),
     tag = "Analysis"
@@ -1060,6 +1061,7 @@ async fn analyze(
         (status = 500, description = "Analysis failed")
     ),
     security(
+        ("bearerAuth" = []),
         ("jwt" = [])
     ),
     tag = "Analysis"
@@ -1213,6 +1215,7 @@ async fn analyze_wasm_profile(
         (status = 500, description = "Branch analysis failed")
     ),
     security(
+        ("bearerAuth" = []),
         ("jwt" = [])
     ),
     tag = "Analysis"
@@ -1273,7 +1276,12 @@ async fn analyze_wasm_branches(
     request_body = OptimizeLimitsRequest,
     responses(
         (status = 200, description = "Resource optimization successful", body = OptimizeLimitsResponse),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Optimization failed")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Analysis"
 )]
@@ -1325,7 +1333,12 @@ pub struct CompareApiResponse {
     responses(
         (status = 200, description = "Comparison report", body = CompareApiResponse),
         (status = 400, description = "Invalid request"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Comparison failed")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Analysis"
 )]
@@ -1532,7 +1545,12 @@ pub struct GasGolfingResponse {
     responses(
         (status = 200, description = "Gas golfing analysis completed", body = GasGolfingResponse),
         (status = 400, description = "Invalid WASM data"),
+        (status = 401, description = "Unauthorized"),
         (status = 500, description = "Analysis failed")
+    ),
+    security(
+        ("bearerAuth" = []),
+        ("jwt" = [])
     ),
     tag = "Analysis"
 )]
@@ -1654,7 +1672,7 @@ async fn fee_history(
     get,
     path = "/fees/analytics",
     responses(
-        (status = 200, description = "Fee analytics retrieved successfully", body = serde_json::Value),
+        (status = 200, description = "Fee analytics retrieved successfully", body = FeeAnalyticsEnvelope),
         (status = 500, description = "Failed to fetch analytics")
     ),
     tag = "Fee Market"
@@ -1688,19 +1706,54 @@ pub struct FeeAnalyticsEnvelope {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearerAuth",
+                utoipa::openapi::security::SecurityScheme::Http(
+                    utoipa::openapi::security::HttpBuilder::new()
+                        .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            );
+            components.add_security_scheme(
+                "jwt",
+                utoipa::openapi::security::SecurityScheme::Http(
+                    utoipa::openapi::security::HttpBuilder::new()
+                        .scheme(utoipa::openapi::security::HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            );
+        }
+    }
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
-        analyze, analyze_wasm, optimize_limits, compare_handler,
+        analyze, analyze_wasm, analyze_wasm_branches, optimize_limits, compare_handler, analyze_gas_golfing,
         auth::challenge_handler, auth::verify_handler, auth::refresh_handler,
-        auth::revoke_handler, auth::jwks_handler,
+        auth::revoke_handler, auth::emergency_pause_handler, auth::jwks_handler,
         fee_recommend, fee_history, fee_analytics,
         vault_store::create_vault_handler, vault_store::get_vault_handler,
-        vault_store::update_vault_handler, vault_store::list_vaults_handler
+        vault_store::update_vault_handler, vault_store::soft_delete_vault_handler,
+        vault_store::restore_vault_handler, vault_store::list_vaults_handler,
+        vault_store::list_deleted_vaults_handler,
+        manager_store::register_manager_handler, manager_store::list_managers_handler,
+        manager_store::get_manager_handler, manager_store::approve_manager_handler,
+        manager_store::reject_manager_handler, manager_store::check_manager_status_handler,
+        reconciliation::reconcile_handler, reconciliation::get_reconcile_job_handler,
+        reconciliation::list_reports_handler,
+        ws::ws_handler
     ),
     components(schemas(
         AnalyzeRequest, AnalyzeWasmRequest, AnalyzeWasmBranchesRequest,
-        WasmBranchAnalysisResponse, ResourceReport,
+        WasmBranchAnalysisResponse, ResourceReport, GasGolfingRequest, GasGolfingResponse,
         OptimizeLimitsRequest, OptimizeLimitsResponse,
         CompareApiResponse, RegressionReport, ResourceDelta, RegressionFlag,
         crate::wasm_branch_analysis::BranchInfo,
@@ -1709,7 +1762,7 @@ pub struct FeeAnalyticsEnvelope {
         crate::wasm_branch_analysis::PathResult,
         auth::ChallengeRequest, auth::ChallengeResponse,
         auth::VerifyRequest, auth::VerifyResponse, auth::RefreshRequest,
-        auth::RevokeResponse,
+        auth::RevokeResponse, auth::EmergencyPauseRequest, auth::EmergencyPauseResponse,
         auth::JwkSetResponse, auth::JwkResponse,
         crate::simulation::OptimizationBuffer,
         crate::simulation::SorobanResources,
@@ -1721,19 +1774,28 @@ pub struct FeeAnalyticsEnvelope {
         crate::fee_analytics::TrendDirection,
         FeeAnalyticsEnvelope,
         vault_store::VaultRecord, vault_store::CreateVaultRequest,
-        vault_store::UpdateVaultRequest, vault_store::ListVaultsQuery
+        vault_store::UpdateVaultRequest, vault_store::ListVaultsQuery,
+        vault_store::ListDeletedVaultsQuery,
+        manager_store::ManagerRecord, manager_store::RegisterManagerRequest,
+        manager_store::ApproveManagerRequest, manager_store::ManagerStatusResponse,
+        reconciliation::ReconcileRequest, reconciliation::ReconcileResponse,
+        reconciliation::ReconciliationReport, reconciliation::ListReportsQuery,
+        crate::jobs::Job, crate::jobs::JobStatus, crate::jobs::JobType
     )),
+    modifiers(&SecurityAddon),
     tags(
         (name = "Analysis", description = "Soroban contract resource analysis endpoints"),
         (name = "Auth", description = "SEP-10 wallet authentication"),
         (name = "Fee Market", description = "Stellar/Soroban fee market analysis and prediction"),
         (name = "Vaults", description = "White-label vault records with optimistic locking"),
+        (name = "Managers", description = "Manager onboarding and KYC approval gate"),
+        (name = "Reconciliation", description = "Fee reconciliation background engine"),
         (name = "Streaming", description = "WebSocket real-time simulation progress streaming")
     ),
     info(
         title = "Perigee API",
         version = "0.1.0",
-        description = "API for analyzing Soroban smart contract resource consumption and fee market predictions"
+        description = "API for analyzing Soroban smart contract resource consumption, fee market predictions, policy vaults, and manager onboarding"
     )
 )]
 struct ApiDoc;
@@ -3113,3 +3175,23 @@ mod validate_config_secrets_tests {
         assert!(validate_config_secrets(&cfg).is_ok());
     }
 }
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+
+    #[test]
+    fn openapi_spec_generates_valid_json_with_security_and_paths() {
+        let openapi = ApiDoc::openapi();
+        let json = serde_json::to_string(&openapi).expect("OpenAPI to JSON failed");
+
+        assert!(json.contains("bearerAuth"), "OpenAPI spec should contain bearerAuth scheme");
+        assert!(json.contains("jwt"), "OpenAPI spec should contain jwt scheme");
+        assert!(json.contains("/analyze"), "OpenAPI spec should contain /analyze path");
+        assert!(json.contains("/vaults"), "OpenAPI spec should contain /vaults path");
+        assert!(json.contains("/fees/analytics"), "OpenAPI spec should contain /fees/analytics path");
+        assert!(json.contains("/managers"), "OpenAPI spec should contain /managers path");
+        assert!(json.contains("/reconcile"), "OpenAPI spec should contain /reconcile path");
+    }
+}
+

@@ -287,6 +287,17 @@ pub struct WsState {
 /// Clients connect with a standard WebSocket handshake; the server streams
 /// JSON-serialised [`SimulationEvent`]s until the job reaches a terminal state
 /// or the client disconnects.
+#[utoipa::path(
+    get,
+    path = "/ws/jobs/{job_id}",
+    params(
+        ("job_id" = String, Path, description = "Job ID")
+    ),
+    responses(
+        (status = 101, description = "Switching Protocols to WebSocket")
+    ),
+    tag = "Streaming"
+)]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(job_id): Path<String>,
