@@ -1,3 +1,4 @@
+pub mod migrations;
 pub mod models;
 pub mod schema;
 
@@ -17,7 +18,7 @@ pub type Pool = SqlitePool;
 
 pub async fn init_pool(database_url: &str) -> Result<Pool, sqlx::Error> {
     let pool = SqlitePool::connect(database_url).await?;
-    sqlx::migrate!().run(&pool).await?;
+    migrations::run_migrations(&pool).await?;
     Ok(pool)
 }
 
@@ -140,14 +141,22 @@ pub mod reconciliation {
     use crate::db::models;
     use redis::{AsyncCommands, Client as RedisClient};
 
-        #[derive(Clone)]
-        pub struct ReconciliationRepo {
+    #[derive(Clone)]
+    pub struct ReconciliationRepo {
         report_table: ReconciliationReportsTable,
         disc_table: ReconciliationDiscrepanciesTable,
         redis: Option<RedisClient>,
     }
 
     impl ReconciliationRepo {
+        /// Borrow the underlying pool.
+        ///
+        /// The readiness probe issues a bare `SELECT 1` to prove the database
+        /// is reachable, and needs a pool rather than a typed query to do it.
+        pub fn pool(&self) -> &schema::DbPool {
+            self.report_table.pool()
+        }
+
         pub fn new(
             report_table: ReconciliationReportsTable,
             disc_table: ReconciliationDiscrepanciesTable,

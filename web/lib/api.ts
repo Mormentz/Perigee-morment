@@ -158,7 +158,10 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       }
 
       const delayMs = BASE_RETRY_DELAY_MS * 2 ** attempt;
-      await sleep(delayMs);
+      // Add full-jitter (0–100 % of the backoff window) to spread thundering-herd
+      // retries across time and avoid synchronized retry storms on shared RPC nodes.
+      const jitter = Math.random() * delayMs;
+      await sleep(delayMs + jitter);
     }
   }
 

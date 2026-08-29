@@ -18,11 +18,12 @@
 //! | `simulation_requests_total` | Counter | `endpoint`, `cache_status` | Simulation requests by cache outcome |
 //! | `simulation_latency_seconds` | Histogram | `endpoint` | Simulation-specific latency |
 //! | `resource_utilization_percent` | Gauge | `resource` | Latest resource-utilisation sample |
+//! | `perigee_shielded_rail_fallback_total` | Counter | — | Settlements that fell back from the shielded tokenless rail to the transparent rail (BE-028) |
 
 use prometheus::{
     opts, register_gauge_vec_with_registry, register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry, GaugeVec, HistogramOpts, HistogramVec,
-    IntCounterVec, Registry,
+    register_int_counter_vec_with_registry, register_int_counter_with_registry, GaugeVec,
+    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, Registry,
 };
 use std::sync::Arc;
 
@@ -68,6 +69,11 @@ pub struct Metrics {
     pub simulation_latency_seconds: HistogramVec,
     /// Latest resource-utilisation sample (e.g. efficiency_score) by resource name.
     pub resource_utilization_percent: GaugeVec,
+
+    // ── Shielded-rail settlement (BE-028) ────────────────────────────────
+    /// Number of settlements that fell back from the shielded tokenless rail
+    /// to the transparent rail (shielded rail unavailable or timed out).
+    pub shielded_rail_fallback_total: IntCounter,
 }
 
 impl Metrics {
@@ -165,6 +171,14 @@ impl Metrics {
             registry
         )?;
 
+        let shielded_rail_fallback_total = register_int_counter_with_registry!(
+            opts!(
+                "perigee_shielded_rail_fallback_total",
+                "Number of settlements that fell back from the shielded tokenless rail to the transparent rail."
+            ),
+            registry
+        )?;
+
         Ok(Arc::new(Self {
             registry,
             http_requests_total,
@@ -176,6 +190,7 @@ impl Metrics {
             simulation_requests_total,
             simulation_latency_seconds,
             resource_utilization_percent,
+            shielded_rail_fallback_total,
         }))
     }
 
@@ -199,5 +214,11 @@ impl Metrics {
         self.rpc_circuit_breaker_tripped
             .with_label_values(&[provider_name])
             .set(if tripped { 1.0 } else { 0.0 });
+    }
+
+    /// Record one settlement that fell back from the shielded tokenless rail
+    /// to the transparent rail (BE-028).
+    pub fn record_shielded_rail_fallback(&self) {
+        self.shielded_rail_fallback_total.inc();
     }
 }

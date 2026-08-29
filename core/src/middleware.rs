@@ -39,6 +39,7 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use serde_json;
 use tower::{Layer, Service};
 use tracing::{info, Span};
 use uuid::Uuid;
@@ -231,4 +232,39 @@ impl Drop for InFlightGuard {
             .with_label_values(&[&self.method, &self.route])
             .dec();
     }
+}
+
+// ── Method-Not-Allowed normaliser ────────────────────────────────────────────
+
+/// Intercept Axum's automatic `405 Method Not Allowed` responses and rewrite
+/// them into the standard `{ "error": "METHOD_NOT_ALLOWED", "message": "…" }`
+/// envelope so every error code — 404, 405, and application errors — looks
+/// identical to the client.
+///
+/// Axum generates 405 internally (before reaching any handler) when the path
+/// matches a route but the HTTP method does not.  This middleware runs
+/// *after* the response is produced and normalises those bare 405 bodies.
+pub async fn method_not_allowed_middleware(request: Request, next: Next) -> Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let response = next.run(request).await;
+
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        tracing::debug!(
+            method = %method,
+            uri = %uri,
+            "Method not allowed"
+        );
+        let body = Json(serde_json::json!({
+            "error": "METHOD_NOT_ALLOWED",
+            "message": format!("Method {} is not allowed for {}", method, uri.path())
+        }));
+        return (StatusCode::METHOD_NOT_ALLOWED, body).into_response();
+    }
+
+    response
 }

@@ -26,7 +26,7 @@
 //! # Usage
 //!
 //! ```rust,no_run
-//! use perigee_core::config::ContractConfig;
+//! use Perigee_core::config::ContractConfig;
 //!
 //! let cfg = ContractConfig::from_env();
 //! println!("policy vault: {:?}", cfg.policy_vault);
@@ -175,8 +175,13 @@ fn read_or_default(var_name: &str, testnet_default: Option<&str>, stage: &Stage)
 mod tests {
     use super::*;
 
+    // Environment variables are process-global; see `errors::ENV_LOCK`.
+    use crate::errors::env_guard;
+
+
     #[test]
     fn detect_stage_defaults_to_local() {
+        let _env = env_guard();
         // Unset both vars — must return Local.
         // (env isolation is best-effort here; real isolation needs a temp env)
         let original = env::var("STELLAR_NETWORK").ok();
@@ -193,6 +198,7 @@ mod tests {
 
     #[test]
     fn detect_stage_testnet() {
+        let _env = env_guard();
         unsafe { env::set_var("STELLAR_NETWORK", "testnet"); }
         assert_eq!(detect_stage(), Stage::Testnet);
         unsafe { env::remove_var("STELLAR_NETWORK"); }
@@ -200,6 +206,7 @@ mod tests {
 
     #[test]
     fn detect_stage_mainnet() {
+        let _env = env_guard();
         unsafe { env::set_var("STELLAR_NETWORK", "mainnet"); }
         assert_eq!(detect_stage(), Stage::Mainnet);
         unsafe { env::remove_var("STELLAR_NETWORK"); }
@@ -211,6 +218,7 @@ mod tests {
 
     #[test]
     fn hello_soroban_has_testnet_default() {
+        let _env = env_guard();
         // Without any env vars set the hello_soroban ID should be the
         // testnet default on Local/Testnet stages.
         unsafe { env::remove_var("STELLAR_NETWORK"); }
@@ -225,6 +233,7 @@ mod tests {
 
     #[test]
     fn env_var_overrides_default() {
+        let _env = env_guard();
         let custom = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
         unsafe { env::set_var("CONTRACT_HELLO_SOROBAN", custom); }
 
@@ -236,6 +245,7 @@ mod tests {
 
     #[test]
     fn require_returns_error_for_none() {
+        let _env = env_guard();
         let cfg = ContractConfig::from_env();
         let result = cfg.require("CONTRACT_POLICY_VAULT", None);
         assert!(result.is_err());
@@ -243,6 +253,7 @@ mod tests {
 
     #[test]
     fn require_returns_ok_for_some() {
+        let _env = env_guard();
         let cfg = ContractConfig::from_env();
         let result = cfg.require("CONTRACT_HELLO_SOROBAN", Some(TESTNET_DEFAULT_CONTRACT_ID));
         assert_eq!(result.unwrap(), TESTNET_DEFAULT_CONTRACT_ID);
@@ -250,6 +261,7 @@ mod tests {
 
     #[test]
     fn mainnet_stage_has_no_defaults() {
+        let _env = env_guard();
         unsafe { env::set_var("STELLAR_NETWORK", "mainnet"); }
         unsafe { env::remove_var("CONTRACT_HELLO_SOROBAN"); }
 

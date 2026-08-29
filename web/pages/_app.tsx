@@ -1,5 +1,6 @@
 import type { AppProps } from "next/app";
 import "../styles/globals.css";
+import { Inter } from "next/font/google";
 import { WalletProvider } from "../context/WalletContext";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Analytics } from "../components/Analytics";
@@ -10,6 +11,15 @@ import { API_URL } from "../lib/api";
 import { useRouter } from "next/router";
 import { useEffect } from "react";
 import { FeatureFlagProvider } from "../features/feature-flags";
+
+// WEB-54 (#187): self-host the Inter typeface through `next/font`. Font files
+// are downloaded and preloaded at build time, eliminating FOIT and render
+// blocking from an external font stylesheet. `inter.className` applies the
+// generated font-family to every Pages Router route.
+const inter = Inter({
+  subsets: ["latin"],
+  display: "swap",
+});
 
 /**
  * Initialize @axe-core/react in development so accessibility violations
@@ -42,23 +52,25 @@ export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter();
 
   return (
-    <FeatureFlagProvider>
-      <NextIntlClientProvider
-        locale={router?.locale ?? "en"}
-        messages={pageProps.messages ?? {}}
-        timeZone="UTC"
-      >
-        <WalletProvider>
-          {/* Network status and API availability (#109) */}
-          <NetworkStatusBanner apiUrl={API_URL} />
-          {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
-          <RpcFallbackBanner apiUrl={API_URL} />
-          <ErrorBoundary>
-            <Component {...pageProps} />
-            <Analytics />
-          </ErrorBoundary>
-        </WalletProvider>
-      </NextIntlClientProvider>
-    </FeatureFlagProvider>
+    <div className={inter.className}>
+      <FeatureFlagProvider>
+        <NextIntlClientProvider
+          locale={router?.locale ?? "en"}
+          messages={pageProps.messages ?? {}}
+          timeZone="UTC"
+        >
+          <WalletProvider>
+            {/* Network status and API availability (#109) */}
+            <NetworkStatusBanner apiUrl={API_URL} />
+            {/* Graceful RPC fallback — shown when the backend is unreachable (#115) */}
+            <RpcFallbackBanner apiUrl={API_URL} />
+            <ErrorBoundary>
+              <Component {...pageProps} />
+              <Analytics />
+            </ErrorBoundary>
+          </WalletProvider>
+        </NextIntlClientProvider>
+      </FeatureFlagProvider>
+    </div>
   );
 }

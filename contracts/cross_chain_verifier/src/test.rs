@@ -1216,3 +1216,85 @@ mod signature_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod signer_removal_tests {
+    use super::*;
+    use soroban_sdk::{Env, Address};
+
+    #[test]
+    fn test_remove_authorized_signer_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CrossChainVerifier);
+        let client = CrossChainVerifierClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let signer = Address::generate(&env);
+
+        // Setup mock admin and add signer
+        client.initialize(&admin);
+        client.add_authorized_signer(&admin, &signer);
+
+        // Verify initial count is 1
+        let initial_count = client.get_signer_count();
+        assert_eq!(initial_count, 1);
+
+        // Remove signer successfully
+        let result = client.try_remove_authorized_signer(&admin, &signer);
+        assert!(result.is_ok());
+
+        // Verify count is decremented to 0 and signer is removed
+        let final_count = client.get_signer_count();
+        assert_eq!(final_count, 0);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_signer_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CrossChainVerifier);
+        let client = CrossChainVerifierClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let unknown_signer = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Attempting to remove a signer that was never added must fail with SignerNotFound
+        let result = client.try_remove_authorized_signer(&admin, &unknown_signer);
+        assert_eq!(result, Err(Ok(ContractError::SignerNotFound)));
+    }
+}
+
+#[cfg(test)]
+mod signer_count_tests {
+    use super::*;
+    use soroban_sdk::{Env, Address};
+
+    #[test]
+    fn test_get_signer_count_after_single_addition() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CrossChainVerifier);
+        let client = CrossChainVerifierClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let signer = Address::generate(&env);
+
+        // 1. Initialize contract with admin
+        client.initialize(&admin);
+
+        // Verify initial count is 0
+        assert_eq!(client.get_signer_count(), 0);
+
+        // 2. Add a single authorized signer
+        client.add_authorized_signer(&admin, &signer, &SignerAlgorithm::Ed25519);
+
+        // 3. Verify get_signer_count returns exactly 1 (preventing duplicate increments)
+        assert_eq!(client.get_signer_count(), 1);
+    }
+}

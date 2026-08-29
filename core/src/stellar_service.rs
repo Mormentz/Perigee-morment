@@ -95,6 +95,20 @@ pub enum StellarServiceError {
     #[error("No healthy RPC providers available")]
     NoHealthyProviders,
 
+    /// The RPC response did not include the network passphrase.
+    #[error("RPC getNetwork response from {url} did not include result.passphrase")]
+    MissingNetworkPassphrase { url: String },
+
+    /// The RPC node is connected to a different Stellar network than expected.
+    #[error(
+        "Stellar network passphrase mismatch from {url}: current `{current}`, expected `{expected}`"
+    )]
+    NetworkPassphraseMismatch {
+        url: String,
+        current: String,
+        expected: String,
+    },
+
     /// Every retry attempt failed.
     #[error("All {attempts} RPC attempt(s) to {url} failed; last error: {last_error}")]
     AllAttemptsFailed {
@@ -205,6 +219,24 @@ impl StellarService {
             registry,
             config,
         }))
+    }
+
+    /// Verify that `provider` is connected to the expected Stellar network.
+    ///
+    /// This must run during startup before any signing state is constructed.
+    /// A missing or mismatched passphrase is treated as fatal because signing
+    /// for the wrong network produces transactions that the target network
+    /// cannot accept.
+    pub async fn validate_network_passphrase(
+        &self,
+        provider: &RpcProvider,
+        expected: &str,
+    ) -> Result<(), StellarServiceError> {
+        let response = self
+            .call_rpc(provider, "getNetwork", Value::Null)
+            .await?;
+
+        Self::compare_network_passphrase(&response, expected, &provider.url)
     }
 
     /// Send a JSON-RPC 2.0 request to `provider`.
@@ -330,6 +362,42 @@ impl StellarService {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    fn compare_network_passphrase(
+        response: &Value,
+        expected: &str,
+        url: &str,
+    ) -> Result<(), StellarServiceError> {
+        let current = response
+            .pointer("/result/passphrase")
+            .and_then(Value::as_str)
+            .ok_or_else(|| StellarServiceError::MissingNetworkPassphrase {
+                url: url.to_owned(),
+            })?;
+
+        tracing::info!(
+            url = %url,
+            current_network_passphrase = current,
+            expected_network_passphrase = expected,
+            "Validating Stellar RPC network passphrase"
+        );
+
+        if current != expected {
+            tracing::error!(
+                url = %url,
+                current_network_passphrase = current,
+                expected_network_passphrase = expected,
+                "Stellar RPC network passphrase mismatch; signing is disabled"
+            );
+            return Err(StellarServiceError::NetworkPassphraseMismatch {
+                url: url.to_owned(),
+                current: current.to_owned(),
+                expected: expected.to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Execute a single HTTP send without any retry logic.
     async fn do_send(
         &self,
@@ -394,7 +462,8 @@ impl StellarService {
     fn backoff_delay(config: &StellarServiceConfig, attempt: u32) -> Duration {
         let exponent = attempt.saturating_sub(2);
         let base_ms = config.base_delay.as_millis() as u64;
-        let raw_ms = base_ms.saturating_mul(1u64.saturating_shl(exponent));
+        let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+        let raw_ms = base_ms.saturating_mul(multiplier);
         let capped_ms = raw_ms.min(MAX_BACKOFF.as_millis() as u64);
 
         // Simple jitter: use subsecond nanoseconds of the current time as a
@@ -407,7 +476,12 @@ impl StellarService {
         // ±25%: shift by up to capped_ms/4 in either direction.
         let quarter = (capped_ms / 4).max(1);
         let jitter = (now_ns % (quarter * 2)) as i64 - quarter as i64;
-        let final_ms = (capped_ms as i64 + jitter).max(0) as u64;
+
+        // Clamp *after* jitter, not before. Capping first and then adding up
+        // to +25% let the returned delay reach 1.25 x MAX_BACKOFF, which is
+        // what `backoff_never_exceeds_max` catches.
+        let final_ms = (capped_ms as i64 + jitter)
+            .clamp(0, MAX_BACKOFF.as_millis() as i64) as u64;
 
         Duration::from_millis(final_ms)
     }
@@ -501,5 +575,71 @@ mod tests {
     fn max_attempts_clamped_to_one() {
         let cfg = StellarServiceConfig::default().with_max_attempts(0);
         assert_eq!(cfg.max_attempts, 1);
+    }
+
+    #[test]
+    fn matching_network_passphrase_is_accepted() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "passphrase": "Test SDF Network ; September 2015"
+            }
+        });
+
+        assert!(StellarService::compare_network_passphrase(
+            &response,
+            "Test SDF Network ; September 2015",
+            "https://rpc.example",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn mismatched_network_passphrase_is_rejected() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {
+                "passphrase": "Public Global Stellar Network ; September 2015"
+            }
+        });
+
+        let error = StellarService::compare_network_passphrase(
+            &response,
+            "Test SDF Network ; September 2015",
+            "https://rpc.example",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            StellarServiceError::NetworkPassphraseMismatch {
+                current,
+                expected,
+                ..
+            } if current.as_str() == "Public Global Stellar Network ; September 2015"
+                && expected.as_str() == "Test SDF Network ; September 2015"
+        ));
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn missing_network_passphrase_is_rejected() {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "result": {}
+        });
+
+        let error = StellarService::compare_network_passphrase(
+            &response,
+            "Test SDF Network ; September 2015",
+            "https://rpc.example",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            StellarServiceError::MissingNetworkPassphrase { .. }
+        ));
+        assert!(!error.is_retryable());
     }
 }

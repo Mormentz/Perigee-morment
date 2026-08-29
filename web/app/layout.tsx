@@ -15,13 +15,22 @@
 
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
+import { Inter } from 'next/font/google';
 import { NetworkStatusBanner } from '@/components/NetworkStatusBanner';
 import { API_URL } from '@/lib/api';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { WalletProvider } from '@/context/WalletContext';
+import '@/styles/globals.css';
 
-// TODO: Move these from pages/_app.tsx during migration
-// import { ErrorBoundary } from '@/components/ErrorBoundary';
-// import { WalletProvider } from '@/context/WalletContext';
-// import '@/styles/globals.css';
+// WEB-54 (#187): self-host the Inter typeface through `next/font` instead of
+// loading it from an external stylesheet. Fonts are downloaded and preloaded
+// at build time (no FOIT, no layout shift) and exposed as the `--font-inter`
+// CSS variable consumed by the Tailwind `font-sans` stack.
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: {
@@ -34,17 +43,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={inter.variable}>
       <body>
-        {/* TODO: Wrap with providers from pages/_app.tsx during migration:
-          <ErrorBoundary>
-            <WalletProvider>
-              {children}
-            </WalletProvider>
-          </ErrorBoundary>
-        */}
-        <NetworkStatusBanner apiUrl={API_URL} />
-        {children}
+        <ErrorBoundary>
+          <WalletProvider>
+            <NetworkStatusBanner apiUrl={API_URL} />
+            {children}
+          </WalletProvider>
+        </ErrorBoundary>
       </body>
     </html>
   );

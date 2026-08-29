@@ -40,16 +40,15 @@ const formatStroops = (stroops: number) => {
   return `${xlm.toFixed(7)} XLM`;
 };
 
-export const GasUsageChart: React.FC<GasUsageChartProps> = React.memo(
-  ({
-    cpu_instructions,
-    ram_bytes,
-    ledger_read_bytes,
-    ledger_write_bytes,
-    transaction_size_bytes,
-    cost_stroops,
-    testnetAverages,
-  }) => {
+const GasUsageChartInner: React.FC<GasUsageChartProps> = ({
+  cpu_instructions,
+  ram_bytes,
+  ledger_read_bytes,
+  ledger_write_bytes,
+  transaction_size_bytes,
+  cost_stroops,
+  testnetAverages,
+}) => {
     const avg = useMemo(
       () => testnetAverages ?? DEFAULT_TESTNET_AVERAGES,
       [testnetAverages],
@@ -226,5 +225,6 @@ export const GasUsageChart: React.FC<GasUsageChartProps> = React.memo(
         </div>
       </div>
     );
-  },
-);
+};
+
+export const GasUsageChart = React.memo(GasUsageChartInner);

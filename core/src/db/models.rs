@@ -4,6 +4,50 @@ use sqlx::FromRow;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+// ── Pagination ────────────────────────────────────────────────────────────────
+
+/// Query parameters accepted by paginated list endpoints.
+///
+/// - `page` is 1-indexed; defaults to 1.
+/// - `page_size` defaults to 50; maximum is 200.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PaginationParams {
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_page_size")]
+    pub page_size: u32,
+}
+
+fn default_page() -> u32 {
+    1
+}
+
+fn default_page_size() -> u32 {
+    50
+}
+
+impl PaginationParams {
+    pub const MAX_PAGE_SIZE: u32 = 200;
+
+    /// Returns the clamped page size and the SQL OFFSET value.
+    pub fn to_limit_offset(&self) -> (i64, i64) {
+        let page = self.page.max(1);
+        let size = self.page_size.clamp(1, Self::MAX_PAGE_SIZE);
+        let offset = (page - 1) * size;
+        (size as i64, offset as i64)
+    }
+}
+
+/// Paginated list response envelope.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PagedResponse<T> {
+    pub data: Vec<T>,
+    pub total_count: i64,
+    pub page: u32,
+    pub page_size: u32,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
 pub struct ManagerRecord {
     pub id: String,
@@ -51,6 +95,9 @@ pub struct VaultRecord {
     pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Set when the vault is soft-deleted (BE-044 / issue #281). `None` means the
+    /// vault is active. Default queries filter rows where this is `NULL`.
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

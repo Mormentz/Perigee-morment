@@ -149,7 +149,7 @@ mod tests {
     #[test]
     fn test_redact_stellar_secret_key() {
         let redactor = LogRedactor::new("test_salt");
-        let secret = "SABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnop";
+        let secret = "SABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnopqrstu";
         assert_eq!(secret.len(), 56);
         let log_line = format!("Found key: {} in logs", secret);
         let redacted = redactor.redact_log_line(&log_line);
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn test_redact_soroban_contract_address() {
         let redactor = LogRedactor::new("test_salt");
-        let contract = "CABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnop";
+        let contract = "CABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnopqrstu";
         assert_eq!(contract.len(), 56);
         let log_line = format!("Contract: {} deployed", contract);
         let redacted = redactor.redact_log_line(&log_line);
@@ -171,7 +171,7 @@ mod tests {
     #[test]
     fn test_does_not_redact_public_keys() {
         let redactor = LogRedactor::new("test_salt");
-        let pubkey = "GABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnop";
+        let pubkey = "GABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnopqrstu";
         assert_eq!(pubkey.len(), 56);
         let log_line = format!("Public key: {}", pubkey);
         let redacted = redactor.redact_log_line(&log_line);
@@ -180,14 +180,14 @@ mod tests {
 
     #[test]
     fn test_extract_stellar_secret_keys() {
-        let input = "key=SABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnop found";
+        let input = "key=SABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnopqrstu found";
         let keys = extract_stellar_secret_keys(input);
         assert_eq!(keys.len(), 1);
     }
 
     #[test]
     fn test_extract_soroban_contract_addresses() {
-        let input = "contract=CABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnop deployed";
+        let input = "contract=CABCDEFGHIJKLMNOPQRSTUVWXYZ23456789abcdefghijklmnopqrstu deployed";
         let addrs = extract_soroban_contract_addresses(input);
         assert_eq!(addrs.len(), 1);
     }

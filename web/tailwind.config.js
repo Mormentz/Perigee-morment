@@ -1,5 +1,6 @@
 /** @type {import("tailwindcss").Config} */
 const colors = require("tailwindcss/colors");
+const defaultTheme = require("tailwindcss/defaultTheme");
 
 module.exports = {
   content: [
@@ -19,6 +20,12 @@ module.exports = {
   ],
   theme: {
     extend: {
+      // WEB-54 (#187): the default sans stack resolves to the `--font-inter`
+      // CSS variable set by `next/font` on <html> (App Router) / the app
+      // wrapper (Pages Router), falling back to the system stack otherwise.
+      fontFamily: {
+        sans: ["var(--font-inter)", ...defaultTheme.fontFamily.sans],
+      },
       colors: {
         // ──────────────────────────────────────────────────────────────
         // Design tokens (WEB-19, #105)

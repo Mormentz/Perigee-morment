@@ -126,7 +126,12 @@ mod tests {
     #[test]
     fn test_boundary_max_inactivity() {
         let mut record = ReputationRecord::new("agent1".to_string(), 100.0, 0.1);
-        let far_future = Utc::now() + Duration::days(i64::MAX / 2);
+        // `Duration::days(i64::MAX / 2)` is outside chrono's representable
+        // range, so it panicked inside `TimeDelta::days` before this test
+        // reached the decay code at all. A thousand years is still far past
+        // the point where `exp(-0.1 * days)` underflows to exactly 0.0, which
+        // is the boundary this test is about.
+        let far_future = Utc::now() + Duration::days(365_000);
         let score = record.current_score(far_future);
         assert_eq!(score, 0.0);
     }

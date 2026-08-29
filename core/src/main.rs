@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
+mod audit_log;
 mod auth;
 mod benchmarks;
 mod billing_service;
 mod cache;
 mod comparison;
+mod config;
+mod db;
 mod errors;
 pub mod fee_analytics;
 pub mod fee_collector;
@@ -14,8 +17,11 @@ mod middleware;
 pub mod insights;
 mod jobs;
 mod merkle_tree;
+mod metrics;
 mod parser;
+mod policy_expiry;
 pub mod reconciliation;
+mod rounding;
 mod routing;
 pub mod rpc_provider;
 mod runner;
@@ -30,18 +36,15 @@ mod ws;
 
 use crate::cache::{ContractCache, SimulationCache};
 use crate::comparison::{CompareMode, RegressionFlag, RegressionReport, ResourceDelta};
-use crate::db;
-use crate::errors::AppError;
-use crate::merkle_tree::MerkleTree;
+use crate::errors::{AppError, Validate, ValidatedJson};
 use axum::{
-    extract::{Json, Multipart, State},
+    extract::{Json, Multipart, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    middleware,
     response::IntoResponse,
     routing::{get, post},
     Extension, Router,
 };
-use config::{Config, ConfigError};
+use ::config::{Config, ConfigError};
 use prometheus::{Encoder, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder};
 use serde::{Deserialize, Serialize};
 use simulation_service::{AnalysisResult, SimulationMetric, SimulationService};
@@ -59,7 +62,7 @@ use crate::jobs::{JobQueue, JobQueueConfig, JobWorker};
 use crate::merkle_tree::MerkleTree;
 use crate::reconciliation::FeeReconciler;
 use crate::rpc_provider::{ProviderRegistry, RegistryConfig, RegistrySnapshot, RpcProvider};
-use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult};
+use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult, SorobanResources};
 use crate::stellar_service::{StellarService, StellarServiceConfig};
 use crate::ws::SimulationBus;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -357,7 +360,7 @@ fn load_config() -> Result<AppConfig, ConfigError> {
     dotenvy::dotenv().ok();
 
     let settings = Config::builder()
-        .add_source(config::Environment::default())
+        .add_source(::config::Environment::default())
         .set_default("server_port", 8080)?
         .set_default("rust_log", "info")?
         .set_default("soroban_rpc_url", "https://soroban-testnet.stellar.org")?
@@ -469,6 +472,7 @@ pub struct AppState {
     /// Process-wide Stellar RPC transport (pooled client, retry, circuit-breaker).
     stellar_service: Arc<StellarService>,
     cache: Arc<SimulationCache>,
+    insights_cache: Arc<crate::cache::InsightsCache>,
     insights_engine: InsightsEngine,
     gas_golfing_analyzer: GasGolfingAnalyzer,
     /// Simulation timeout for RPC requests
@@ -573,6 +577,18 @@ pub struct AnalyzeRequest {
     #[serde(default)]
     #[schema(example = false)]
     pub include_merkle_tree: Option<bool>,
+}
+
+impl Validate for AnalyzeRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.contract_id.trim().is_empty() {
+            return Err("contract_id must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -692,6 +708,18 @@ pub struct OptimizeLimitsRequest {
     pub    safety_margin: f64,
 }
 
+impl Validate for OptimizeLimitsRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.contract_id.trim().is_empty() {
+            return Err("contract_id must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 fn default_safety_margin() -> f64 {
     0.05
 }
@@ -784,6 +812,18 @@ pub struct AnalyzeWasmRequest {
     pub enable_experimental: Option<bool>,
 }
 
+impl Validate for AnalyzeWasmRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
+}
+
 /// Request body for the WASM profiling endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ProfileWasmRequest {
@@ -794,6 +834,18 @@ pub struct ProfileWasmRequest {
     /// Optional function arguments.
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+impl Validate for ProfileWasmRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Response body for the WASM profiling endpoint.
@@ -818,6 +870,18 @@ pub struct AnalyzeWasmBranchesRequest {
     /// Additional permutations are generated automatically.
     #[schema(example = "[]")]
     pub args: Option<Vec<String>>,
+}
+
+impl Validate for AnalyzeWasmBranchesRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.function_name.trim().is_empty() {
+            return Err("function_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// API response for the WASM execution-branch analysis endpoint.
@@ -943,151 +1007,45 @@ fn to_report(
 )]
 async fn analyze(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeRequest>,
-) -> Result<(HeaderMap, Json<ResourceReport>), AppError> {
-    // Create a tracing span with structured fields for this request
+    ValidatedJson(payload): ValidatedJson<AnalyzeRequest>,
+) -> Result<(HeaderMap, Json<crate::jobs::SubmitJobResponse>), AppError> {
     let span = tracing::info_span!(
         "analyze",
         contract_id = %payload.contract_id,
         function_name = %payload.function_name,
     );
     let _enter = span.enter();
+    tracing::info!("Received analyze request, offloading to background task");
 
-    tracing::info!("Received analyze request");
-
-    let args = payload.args.clone().unwrap_or_default();
-    let cache_key =
-        SimulationCache::generate_key(&payload.contract_id, &payload.function_name, &args);
-
-    // Track simulation latency
-    let start_time = std::time::Instant::now();
-
-    let (result, cache_status): (SimulationResult, &'static str) =
-        if let Some(cached) = state.cache.get(&cache_key).await {
-            tracing::debug!("Cache HIT for key: {}", cache_key);
-            (cached, "HIT")
-        } else {
-            tracing::debug!("Cache MISS for key: {}", cache_key);
-
-            // Wrap the simulation call with a timeout to prevent hanging
-            let sim_result = tokio::time::timeout(
-                state.simulation_timeout,
-                state.engine.simulate_from_contract_id(
-                    &payload.contract_id,
-                    &payload.function_name,
-                    args,
-                    payload.ledger_overrides.clone(),
-                    payload.protocol_version,
-                    payload.enable_experimental,
-                ),
-            )
-            .await
-            .map_err(|_| {
-                state
-                    .metrics
-                    .rpc_error_count_total
-                    .with_label_values(&["/analyze", "timeout"])
-                    .inc();
-                tracing::error!("Simulation timed out after {:?}", state.simulation_timeout);
-                AppError::Internal(format!(
-                    "Simulation timed out after {} seconds",
-                    state.simulation_timeout.as_secs()
-                ))
-            })?;
-
-            let sim: SimulationResult = match sim_result {
-                Ok(sim) => sim,
-                Err(err) => {
-                    state
-                        .metrics
-                        .rpc_error_count_total
-                        .with_label_values(&["/analyze", "simulation_error"])
-                        .inc();
-                    return Err(err.into());
-                }
-            };
-            state.cache.set(cache_key, sim.clone()).await;
-            (sim, "MISS")
-        };
-
-    let latency_ms = start_time.elapsed().as_millis() as u64;
-    state
-        .metrics
-        .simulation_latency_seconds
-        .with_label_values(&["/analyze"])
-        .observe(start_time.elapsed().as_secs_f64());
-    state
-        .metrics
-        .simulation_requests_total
-        .with_label_values(&["/analyze", cache_status])
-        .inc();
-
-    // Log comprehensive simulation metrics
-    tracing::info!(
-        latency_ms = latency_ms,
-        cache_status = cache_status,
-        cpu_instructions = result.resources.cpu_instructions,
-        ram_bytes = result.resources.ram_bytes,
-        ledger_read_bytes = result.resources.ledger_read_bytes,
-        ledger_write_bytes = result.resources.ledger_write_bytes,
-        transaction_size_bytes = result.resources.transaction_size_bytes,
-        cost_stroops = result.cost_stroops,
-        latest_ledger = result.latest_ledger,
-        "Simulation completed successfully"
-    );
-
-    state.cache.log_stats();
-    let insights_report = state.insights_engine.analyze(&result.resources);
-    state
-        .metrics
-        .resource_utilization_percent
-        .with_label_values(&["efficiency_score"])
-        .set(insights_report.efficiency_score as f64);
-
-    // Generate Merkle tree root if requested
-    let merkle_tree_root = if payload.include_merkle_tree.unwrap_or(false) {
-        result.state_snapshot.as_ref().and_then(|snapshot| {
-            // Extract ledger entries as leaves for the Merkle tree
-            let leaves: Vec<Vec<u8>> = snapshot
-                .ledger_entries
-                .values()
-                .filter_map(|entry_b64| hex::decode(entry_b64).ok())
-                .collect();
-
-            if leaves.is_empty() {
-                tracing::warn!("No ledger entries available for Merkle tree generation");
-                None
-            } else {
-                let mut tree = MerkleTree::new(256);
-                let mut tree = MerkleTree::new(32);
-                if let Err(e) = tree.build(leaves) {
-                    tracing::error!("Failed to generate Merkle tree: {}", e);
-                    None
-                } else {
-                    tracing::info!("Generated Merkle tree with {} leaves", tree.leaf_count);
-                    tracing::info!("Generated Merkle tree with {} leaves", tree.leaf_count());
-                    Some(tree.get_root_hex())
-                }
-            }
-        })
-    } else {
-        None
-    };
+    let job_id = state
+        .job_queue
+        .submit(
+            crate::jobs::JobType::Analyze,
+            crate::jobs::JobPayload::Analyze {
+                contract_id: payload.contract_id,
+                function_name: payload.function_name,
+                args: payload.args,
+                ledger_overrides: payload.ledger_overrides,
+            },
+            None,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
-        HeaderName::from_static("x-Perigee-cache"),
-        HeaderValue::from_static(cache_status),
-    );
-    headers.insert(
-        HeaderName::from_static("x-Perigee-latency-ms"),
-        HeaderValue::from_str(&latency_ms.to_string())
+        HeaderName::from_static("x-perigee-job"),
+        HeaderValue::from_str(&job_id.to_string())
             .unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
 
     Ok((
         headers,
-        Json(to_report(&result, &state.insights_engine, merkle_tree_root)),
+        Json(crate::jobs::SubmitJobResponse {
+            job_id: job_id.to_string(),
+            status: crate::jobs::JobStatus::Queued,
+            message: "Simulation and analysis job submitted".to_string(),
+        }),
     ))
 }
 
@@ -1108,7 +1066,7 @@ async fn analyze(
 )]
 async fn analyze_wasm(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeWasmRequest>,
+    ValidatedJson(payload): ValidatedJson<AnalyzeWasmRequest>,
 ) -> Result<Json<ResourceReport>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1205,7 +1163,7 @@ async fn metrics_handler(
 
 async fn analyze_wasm_profile(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<ProfileWasmRequest>,
+    ValidatedJson(payload): ValidatedJson<ProfileWasmRequest>,
 ) -> Result<Json<ProfileResponse>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1261,7 +1219,7 @@ async fn analyze_wasm_profile(
 )]
 async fn analyze_wasm_branches(
     State(_state): State<Arc<AppState>>,
-    Json(payload): Json<AnalyzeWasmBranchesRequest>,
+    ValidatedJson(payload): ValidatedJson<AnalyzeWasmBranchesRequest>,
 ) -> Result<Json<WasmBranchAnalysisResponse>, AppError> {
     use crate::wasm_branch_analysis::analyze_wasm_branches as run_analysis;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -1321,7 +1279,7 @@ async fn analyze_wasm_branches(
 )]
 async fn optimize_limits(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<OptimizeLimitsRequest>,
+    ValidatedJson(payload): ValidatedJson<OptimizeLimitsRequest>,
 ) -> Result<Json<OptimizeLimitsResponse>, AppError> {
     tracing::info!(
         "Optimizing limits for contract: {}, function: {}",
@@ -1541,6 +1499,23 @@ pub struct GasGolfingRequest {
     /// Contract name for identification
     #[schema(example = "my_contract")]
     pub contract_name: String,
+    /// Protocol version whose Soroban resource prices should be used.
+    pub protocol_version: Option<u32>,
+    /// Measured resources from a Soroban simulation. Without this, savings
+    /// remain unquantified because static WASM analysis cannot measure hosts.
+    pub measured_resources: Option<SorobanResources>,
+}
+
+impl Validate for GasGolfingRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.wasm_bytes.trim().is_empty() {
+            return Err("wasm_bytes must be a non-empty string".to_string());
+        }
+        if self.contract_name.trim().is_empty() {
+            return Err("contract_name must be a non-empty string".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1563,7 +1538,7 @@ pub struct GasGolfingResponse {
 )]
 async fn analyze_gas_golfing(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<GasGolfingRequest>,
+    ValidatedJson(payload): ValidatedJson<GasGolfingRequest>,
 ) -> Result<Json<GasGolfingResponse>, AppError> {
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1578,10 +1553,19 @@ async fn analyze_gas_golfing(
 
     let contract_name = payload.contract_name.clone();
 
+    let analyzer = match payload.protocol_version {
+        Some(version) => GasGolfingAnalyzer::for_protocol_version(version)
+            .map_err(|e| AppError::BadRequest(e.to_string()))?,
+        None => state.gas_golfing_analyzer.clone(),
+    };
+    let measured_resources = payload.measured_resources;
+
     let report = tokio::task::spawn_blocking(move || {
-        state
-            .gas_golfing_analyzer
-            .analyze_wasm(&wasm_bytes, &contract_name)
+        analyzer.analyze_wasm_with_measurement(
+            &wasm_bytes,
+            &contract_name,
+            measured_resources.as_ref(),
+        )
     })
     .await
     .map_err(|e| AppError::Internal(format!("Gas golfing analysis task panicked: {}", e)))?;
@@ -1773,7 +1757,7 @@ async fn ready_check(State(state): State<Arc<AppState>>) -> axum::response::Resp
     use axum::response::IntoResponse;
     
     let db_ok = sqlx::query("SELECT 1")
-        .execute(&state.reconciler_pool)
+        .execute(state.reconciliation_repo.pool())
         .await
         .is_ok();
         
@@ -2145,20 +2129,24 @@ async fn main() {
         return;
     }
 
+    // ── CLI: migrate subcommand ──────────────────────────────────────────
+    if args.len() > 1 && args[1] == "migrate" {
+        tracing::info!(database_url = %config.database_url, "Running database migrations");
+        let db_pool = sqlx::SqlitePool::connect(&config.database_url)
+            .await
+            .expect("Failed to connect to database");
+        crate::db::migrations::run_migrations(&db_pool)
+            .await
+            .expect("Failed to run database migrations");
+        println!("Database migrations applied successfully.");
+        return;
+    }
+
     tracing::info!("Starting Perigee API Server...");
 
-    let auth_state = Arc::new(auth::AuthState::new(
-        config.jwt_private_key.clone(),
-        None,
-        config.network_passphrase.clone(),
-        config.emergency_verification_paused,
-    ));
-    tracing::info!(
-        "SEP-10 server account: {}",
-        auth_state.server_stellar_address()
-    );
     // ── Multi-node RPC setup ────────────────────────────────────────────
     let providers = build_providers(&config);
+    let startup_providers = providers.clone();
     let provider_names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
     tracing::info!(providers = ?provider_names, "RPC provider pool");
 
@@ -2200,7 +2188,35 @@ async fn main() {
         Arc::clone(&registry),
         StellarServiceConfig::default().with_timeout(simulation_timeout),
     ));
+
+    for provider in &startup_providers {
+        if let Err(error) = stellar_service
+            .validate_network_passphrase(provider, &config.network_passphrase)
+            .await
+        {
+            tracing::error!(
+                provider = %provider.name,
+                url = %provider.url,
+                error = %error,
+                "Stellar network validation failed at startup; refusing to initialize signing"
+            );
+            panic!("Stellar network validation failed: {}", error);
+        }
+    }
     tracing::info!("StellarService initialized (pooled client, retry, circuit-breaker)");
+
+    // Construct signing state only after every configured RPC provider has
+    // proved that it is connected to the expected Stellar network.
+    let auth_state = Arc::new(auth::AuthState::new(
+        config.jwt_private_key.clone(),
+        None,
+        config.network_passphrase.clone(),
+        config.emergency_verification_paused,
+    ));
+    tracing::info!(
+        "SEP-10 server account: {}",
+        auth_state.server_stellar_address()
+    );
 
     // ── Fee Market Setup ────────────────────────────────────────────────
     let database_url = &config.database_url;
@@ -2210,9 +2226,8 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    // Run migrations
-    sqlx::migrate!()
-        .run(&db_pool)
+    // Run migrations (idempotent; tracked in sqlx's _sqlx_migrations table).
+    crate::db::migrations::run_migrations(&db_pool)
         .await
         .expect("Failed to run database migrations");
 
@@ -2253,6 +2268,7 @@ async fn main() {
     // ── WebSocket event bus ─────────────────────────────────────────────
     let simulation_bus = SimulationBus::new();
 
+    let insights_cache = crate::cache::InsightsCache::new();
     let job_worker = JobWorker::new(
         job_queue.clone(),
         SimulationEngine::with_registry_and_timeout_and_mode(
@@ -2262,6 +2278,7 @@ async fn main() {
         )
         .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
+        insights_cache.clone(),
         job_queue_config,
     )
     .with_bus(Arc::clone(&simulation_bus))
@@ -2291,6 +2308,7 @@ async fn main() {
         SimulationEngine::with_registry_and_timeout(Arc::clone(&registry), simulation_timeout)
             .with_stellar_service(Arc::clone(&stellar_service)),
         InsightsEngine::new(),
+        insights_cache.clone(),
         job_config,
     );
 
@@ -2356,6 +2374,7 @@ async fn main() {
         provider_registry: Arc::clone(&registry),
         stellar_service: Arc::clone(&stellar_service),
         cache: simulation_cache,
+        insights_cache,
         insights_engine: InsightsEngine::new(),
         gas_golfing_analyzer: GasGolfingAnalyzer::new(),
         simulation_timeout,
@@ -2384,9 +2403,17 @@ async fn main() {
         .route("/vaults", get(vault_store::list_vaults_handler).post(vault_store::create_vault_handler))
         .route(
             "/vaults/:id",
-            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler),
+            get(vault_store::get_vault_handler).patch(vault_store::update_vault_handler).delete(vault_store::soft_delete_vault_handler),
         )
-        .route_layer(middleware::from_fn(auth::auth_middleware));
+        .route(
+            "/vaults/:id/restore",
+            post(vault_store::restore_vault_handler),
+        )
+        .route(
+            "/admin/vaults/deleted",
+            get(vault_store::list_deleted_vaults_handler),
+        )
+        .route_layer(axum::middleware::from_fn(auth::auth_middleware));
 
     let app = Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -2448,7 +2475,12 @@ async fn main() {
         .fallback(not_found_handler)
         .layer(Extension(auth_state))
         .layer(cors)
-        .layer(crate::middleware::correlation_id_middleware)
+        .layer(axum::middleware::from_fn(
+            crate::middleware::method_not_allowed_middleware,
+        ))
+        .layer(axum::middleware::from_fn(
+            crate::middleware::correlation_id_middleware,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 2)) // 2 MB limit
         .with_state(app_state); // ← thread AppState through all handlers
@@ -2510,7 +2542,7 @@ mod cors_tests {
         // For a lightweight structural check we inspect the Debug output, which
         // differs between `Any` and `List(...)`.
         let dbg = format!("{:?}", layer);
-        if dbg.contains("Any") {
+        if is_any_origin(&dbg) {
             // Any-mode layer: every origin is "allowed" from its perspective.
             true
         } else {
@@ -2519,13 +2551,23 @@ mod cors_tests {
         }
     }
 
+    /// Whether a `CorsLayer`'s debug rendering describes an allow-any policy.
+    ///
+    /// tower-http renders this as `allow_origin: Const("*")`, and older
+    /// versions rendered it as `Any`. These tests inspect the Debug output
+    /// because `AllowOrigin` exposes no predicate, so accept both spellings
+    /// rather than pinning to one release's formatting.
+    fn is_any_origin(dbg: &str) -> bool {
+        dbg.contains("Any") || dbg.contains(r#"allow_origin: Const("*")"#)
+    }
+
     #[test]
     fn empty_string_produces_any_origin() {
         let layer = build_cors_layer("");
         let dbg = format!("{:?}", layer);
         assert!(
-            dbg.contains("Any"),
-            "Expected Any in debug output, got: {dbg}"
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy, got: {dbg}"
         );
     }
 
@@ -2534,8 +2576,8 @@ mod cors_tests {
         let layer = build_cors_layer("   ");
         let dbg = format!("{:?}", layer);
         assert!(
-            dbg.contains("Any"),
-            "Expected Any for whitespace input, got: {dbg}"
+            is_any_origin(&dbg),
+            "Expected an allow-any origin policy for whitespace input, got: {dbg}"
         );
     }
 
@@ -2759,6 +2801,7 @@ mod tests {
         let app_state = Arc::new(AppState {
             engine: SimulationEngine::new("https://test.example.com".to_string()),
             cache: SimulationCache::new(),
+            insights_cache: crate::cache::InsightsCache::new(),
             insights_engine: InsightsEngine::new(),
             simulation_timeout: std::time::Duration::from_secs(30),
         });
@@ -2769,7 +2812,7 @@ mod tests {
         ));
         let protected = Router::new()
             .route("/analyze/wasm/profile", post(analyze_wasm_profile))
-            .route_layer(middleware::from_fn(auth::auth_middleware));
+            .route_layer(axum::middleware::from_fn(auth::auth_middleware));
         Router::new()
             .merge(protected)
             .layer(Extension(auth_state))

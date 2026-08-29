@@ -73,5 +73,9 @@
   "rpc.checking": "Checking…",
   "rpc.getHelp": "Get help",
   "rpc.statusPage": "Status page",
-  "rpc.retry": "Retry"
+  "rpc.retry": "Retry",
+  "walletModal.title": "Connect Wallet",
+  "walletModal.connecting": "Connecting...",
+  "walletModal.description": "Connect your wallet to get started with Perigee",
+  "walletModal.connectButton": "Connect Wallet"
 }

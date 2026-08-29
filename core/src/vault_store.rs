@@ -5,8 +5,8 @@
 //! otherwise the caller gets a conflict and must reload.
 
 use crate::auth::AuthenticatedUser;
-use crate::errors::AppError;
 use crate::db;
+use crate::errors::AppError;
 use axum::{
     extract::{Extension, Path, Query, State},
     Json,
@@ -36,6 +36,23 @@ pub enum VaultStoreError {
     InvalidData(String),
 }
 
+impl From<crate::policy_expiry::PolicyExpiryError> for AppError {
+    fn from(err: crate::policy_expiry::PolicyExpiryError) -> Self {
+        use crate::policy_expiry::PolicyExpiryError;
+
+        match err {
+            PolicyExpiryError::PolicyExpired { .. } => AppError::PolicyExpired(err.to_string()),
+
+            // A policy nobody can parse cannot authorise anything, but it is a
+            // configuration fault rather than a lapsed authority, so it reads
+            // as a bad request rather than a 403.
+            PolicyExpiryError::MalformedPolicy(_) | PolicyExpiryError::InvalidExpiry(_) => {
+                AppError::BadRequest(err.to_string())
+            }
+        }
+    }
+}
+
 impl From<VaultStoreError> for AppError {
     fn from(err: VaultStoreError) -> Self {
         match err {
@@ -52,48 +69,12 @@ impl From<VaultStoreError> for AppError {
     }
 }
 
-/// Persisted vault record. `version` is the optimistic-lock token.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct VaultRecord {
-    pub id: String,
-    pub manager_id: String,
-    pub name: String,
-    pub status: String,
-    pub config_json: String,
-    pub version: i64,
-    pub idempotency_key: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct CreateVaultRequest {
-    pub manager_id: String,
-    pub name: String,
-    #[serde(default = "default_status")]
-    pub status: String,
-    #[serde(default = "default_config")]
-    pub config_json: String,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
-fn default_status() -> String {
-    "active".to_string()
-}
-
-fn default_config() -> String {
-    "{}".to_string()
-}
-
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct UpdateVaultRequest {
-    /// Required optimistic-lock version from the last GET/create response.
-    pub version: i64,
-    pub name: Option<String>,
-    pub status: Option<String>,
-    pub config_json: Option<String>,
-}
+/// Vault DTOs live in [`crate::db::models`]: the typed DB layer returns them
+/// directly, so re-exporting is what keeps this store's signatures compatible
+/// with what the DB hands back. They were previously duplicated here
+/// field-for-field, which is what made `VaultStore::get` return one type while
+/// the DB produced another.
+pub use crate::db::models::{CreateVaultRequest, UpdateVaultRequest, VaultRecord};
 
 pub struct VaultStore {
     vaults: db::schema::VaultsTable,
@@ -143,25 +124,44 @@ impl VaultStore {
         let config_json = req.config_json.trim();
 
         self.vaults
-            .insert(&id, manager_id, name, status, config_json, idempotency_key, now)
+            .insert(
+                &id,
+                manager_id,
+                name,
+                status,
+                config_json,
+                idempotency_key,
+                now,
+            )
             .await
             .map_err(VaultStoreError::Database)
     }
 
-    pub async fn list_by_manager(&self, manager_id: &str) -> Result<Vec<VaultRecord>, VaultStoreError> {
-        sqlx::query_as::<_, VaultRecord>(
-            r#"
-            SELECT id, manager_id, name, status, config_json, version,
-                   idempotency_key, created_at, updated_at
-            FROM vaults
-            WHERE manager_id = ?1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(manager_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(VaultStoreError::Database)
+    pub async fn list_by_manager(
+        &self,
+        manager_id: &str,
+        pagination: &crate::db::models::PaginationParams,
+    ) -> Result<crate::db::models::PagedResponse<VaultRecord>, VaultStoreError> {
+        let (limit, offset) = pagination.to_limit_offset();
+        let (data, total_count) = self
+            .vaults
+            .list_by_manager_paginated(manager_id, limit, offset)
+            .await
+            .map_err(VaultStoreError::Database)?;
+
+        let page = pagination.page.max(1);
+        let page_size = pagination
+            .page_size
+            .clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
+        let has_more = offset + limit < total_count;
+
+        Ok(crate::db::models::PagedResponse {
+            data,
+            total_count,
+            page,
+            page_size,
+            has_more,
+        })
     }
 
     pub async fn get(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
@@ -183,33 +183,95 @@ impl VaultStore {
         req: &UpdateVaultRequest,
     ) -> Result<VaultRecord, VaultStoreError> {
         if req.version < 1 {
-            return Err(VaultStoreError::InvalidData(
-                "version must be >= 1".into(),
-            ));
+            return Err(VaultStoreError::InvalidData("version must be >= 1".into()));
         }
 
         let name = req.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let status = req.status.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let status = req
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let config_json = req.config_json.as_deref();
         let now = Utc::now();
 
-        self.vaults
+        let result = self
+            .vaults
             .update(id, req.version, name, status, config_json, now)
-            .await
-            .map_err(|e| match e {
-                sqlx::Error::RowNotFound => VaultStoreError::NotFound(id.to_string()),
-                sqlx::Error::Database(db_err) => {
-                    if db_err.message().contains("UNIQUE") {
-                        VaultStoreError::InvalidData(
-                            "A vault with this idempotency key already exists".into(),
-                        )
-                    } else {
-                        VaultStoreError::Database(e)
-                    }
+            .await;
+
+        match result {
+            Ok(record) => Ok(record),
+
+            // The typed update matches on `id AND version`, so "no rows" means
+            // either the vault is gone or the caller held a stale version.
+            // Those are different answers — 404 versus 409 — and the caller
+            // needs to know which, so ask the store which one it was.
+            Err(sqlx::Error::RowNotFound) => {
+                if self.vaults.find_by_id(id).await.ok().flatten().is_some() {
+                    Err(VaultStoreError::Conflict {
+                        vault_id: id.to_string(),
+                        expected_version: req.version,
+                    })
+                } else {
+                    Err(VaultStoreError::NotFound(id.to_string()))
                 }
-                other => VaultStoreError::Database(other),
-            })
+            }
+
+            Err(sqlx::Error::Database(db_err)) => {
+                if db_err.message().contains("UNIQUE") {
+                    Err(VaultStoreError::InvalidData(
+                        "A vault with this idempotency key already exists".into(),
+                    ))
+                } else {
+                    Err(VaultStoreError::Database(sqlx::Error::Database(db_err)))
+                }
+            }
+
+            Err(other) => Err(VaultStoreError::Database(other)),
+        }
     }
+}
+
+/// Fetch a vault regardless of deletion state. Used by the admin restore
+/// path and by the delete handler (which must check ownership of a vault
+/// that may already be soft-deleted).
+pub async fn get_including_deleted(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    self.vaults
+        .find_by_id_including_deleted(id)
+        .await
+        .map_err(VaultStoreError::Database)?
+        .ok_or_else(|| VaultStoreError::NotFound(id.to_string()))
+}
+
+/// Soft-delete a vault: stamp `deleted_at` without removing the row
+/// (BE-044 / issue #281). Idempotent for an already-deleted vault
+/// (`NotFound` if it does not exist).
+pub async fn soft_delete(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    let now = Utc::now();
+    let affected = self
+        .vaults
+        .soft_delete(id, now)
+        .await
+        .map_err(VaultStoreError::Database)?;
+    if affected == 0 {
+        return Err(VaultStoreError::NotFound(id.to_string()));
+    }
+    self.get_including_deleted(id).await
+}
+
+/// Restore a soft-deleted vault by clearing `deleted_at` (BE-044 / #281).
+pub async fn restore(&self, id: &str) -> Result<VaultRecord, VaultStoreError> {
+    let now = Utc::now();
+    let affected = self
+        .vaults
+        .restore(id, now)
+        .await
+        .map_err(VaultStoreError::Database)?;
+    if affected == 0 {
+        return Err(VaultStoreError::NotFound(id.to_string()));
+    }
+    self.get_including_deleted(id).await
 }
 
 /// Verify that `manager_id` (UUID) belongs to the authenticated Stellar address.
@@ -223,9 +285,7 @@ async fn verify_ownership(
         .find_by_stellar_address(&user.stellar_address)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| {
-            AppError::Unauthorized("Manager not found for authenticated user".into())
-        })?;
+        .ok_or_else(|| AppError::Unauthorized("Manager not found for authenticated user".into()))?;
     if manager.id != manager_id {
         return Err(AppError::Unauthorized(
             "You can only access vaults belonging to your own manager account".into(),
@@ -234,9 +294,20 @@ async fn verify_ownership(
     Ok(())
 }
 
+fn list_vaults_default_page() -> u32 {
+    1
+}
+fn list_vaults_default_page_size() -> u32 {
+    50
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ListVaultsQuery {
     pub manager_id: String,
+    #[serde(default = "list_vaults_default_page")]
+    pub page: u32,
+    #[serde(default = "list_vaults_default_page_size")]
+    pub page_size: u32,
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
@@ -245,10 +316,12 @@ pub struct ListVaultsQuery {
     get,
     path = "/vaults",
     params(
-        ("manager_id" = String, Query, description = "Manager ID to list vaults for")
+        ("manager_id" = String, Query, description = "Manager ID to list vaults for"),
+        ("page" = Option<u32>, Query, description = "Page number (1-indexed, default 1)"),
+        ("page_size" = Option<u32>, Query, description = "Records per page (default 50, max 200)")
     ),
     responses(
-        (status = 200, description = "List of vaults for the manager", body = Vec<VaultRecord>),
+        (status = 200, description = "Paginated list of vaults for the manager", body = PagedResponse<VaultRecord>),
         (status = 401, description = "Unauthorized")
     ),
     tag = "Vaults"
@@ -257,10 +330,17 @@ pub async fn list_vaults_handler(
     State(state): State<Arc<crate::AppState>>,
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<ListVaultsQuery>,
-) -> Result<Json<Vec<VaultRecord>>, AppError> {
+) -> Result<Json<crate::db::models::PagedResponse<VaultRecord>>, AppError> {
     verify_ownership(&state, &user, &query.manager_id).await?;
-    let vaults = state.vault_store.list_by_manager(&query.manager_id).await?;
-    Ok(Json(vaults))
+    let pagination = crate::db::models::PaginationParams {
+        page: query.page,
+        page_size: query.page_size,
+    };
+    let result = state
+        .vault_store
+        .list_by_manager(&query.manager_id, &pagination)
+        .await?;
+    Ok(Json(result))
 }
 
 #[utoipa::path(
@@ -290,7 +370,11 @@ pub async fn create_vault_handler(
         ));
     }
     let vault = state.vault_store.create(&payload).await?;
-    crate::audit_log::log_audit_event(&payload.manager_id, "vault_provisioning", &payload.manager_id);
+    crate::audit_log::log_audit_event(
+        &payload.manager_id,
+        "vault_provisioning",
+        &payload.manager_id,
+    );
     Ok(Json(vault))
 }
 
@@ -334,6 +418,12 @@ pub async fn update_vault_handler(
 ) -> Result<Json<VaultRecord>, AppError> {
     let vault = state.vault_store.get(&id).await?;
     verify_ownership(&state, &user, &vault.manager_id).await?;
+
+    // BE-023: an expired policy authorises nothing. Checked against the
+    // *stored* policy, before the update is applied — otherwise a caller could
+    // use an expired policy to extend its own expiry.
+    crate::policy_expiry::ensure_policy_active(&vault.config_json, chrono::Utc::now())?;
+
     let vault = state.vault_store.update(&id, &payload).await?;
     if payload.config_json.is_some() {
         crate::audit_log::log_audit_event(&vault.manager_id, "fee_split_change", &vault.manager_id);
@@ -341,6 +431,140 @@ pub async fn update_vault_handler(
         crate::audit_log::log_audit_event(&vault.manager_id, "vault_update", &vault.manager_id);
     }
     Ok(Json(vault))
+}
+
+/// Gate a handler on admin privileges.
+///
+/// There is no admin role in the JWT claims today, so admin authority is an
+/// allow-list of Stellar addresses sourced from the `PERIGEE_ADMIN_STELLAR_ADDRESSES`
+/// environment variable (comma-separated). Requests from any other address are
+/// rejected with `401 Unauthorized`. (BE-044 / issue #281.)
+fn require_admin(user: &AuthenticatedUser) -> Result<(), AppError> {
+    let allowed = std::env::var("PERIGEE_ADMIN_STELLAR_ADDRESSES").unwrap_or_default();
+    let is_admin = allowed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .any(|addr| addr == user.stellar_address);
+    if is_admin {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized(
+            "Admin privileges required to perform this action".into(),
+        ))
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/vaults/{id}",
+    params(("id" = String, Path, description = "Vault ID")),
+    responses(
+        (status = 200, description = "Vault soft-deleted", body = VaultRecord),
+        (status = 404, description = "Vault not found")
+    ),
+    tag = "Vaults"
+)]
+pub async fn soft_delete_vault_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<VaultRecord>, AppError> {
+    // Ownership is checked against the (possibly deleted) vault so the owner can
+    // still delete their own vault.
+    let vault = state.vault_store.get_including_deleted(&id).await?;
+    verify_ownership(&state, &user, &vault.manager_id).await?;
+    let vault = state.vault_store.soft_delete(&id).await?;
+    crate::audit_log::log_audit_event(&vault.manager_id, "vault_soft_delete", &vault.manager_id);
+    Ok(Json(vault))
+}
+
+#[utoipa::path(
+    post,
+    path = "/vaults/{id}/restore",
+    params(("id" = String, Path, description = "Vault ID")),
+    responses(
+        (status = 200, description = "Vault restored", body = VaultRecord),
+        (status = 403, description = "Admin privileges required"),
+        (status = 404, description = "Vault not found")
+    ),
+    tag = "Vaults"
+)]
+pub async fn restore_vault_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> Result<Json<VaultRecord>, AppError> {
+    require_admin(&user)?;
+    let vault = state.vault_store.restore(&id).await?;
+    crate::audit_log::log_audit_event(&vault.manager_id, "vault_restore", &vault.manager_id);
+    Ok(Json(vault))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ListDeletedVaultsQuery {
+    /// Optional manager to scope the listing to.
+    pub manager_id: Option<String>,
+    #[serde(default = "list_vaults_default_page")]
+    pub page: u32,
+    #[serde(default = "list_vaults_default_page_size")]
+    pub page_size: u32,
+}
+
+#[utoipa::path(
+    get,
+    path = "/admin/vaults/deleted",
+    params(
+        ("manager_id" = Option<String>, Query, description = "Optional manager ID to scope the listing"),
+        ("page" = Option<u32>, Query, description = "Page number (1-indexed, default 1)"),
+        ("page_size" = Option<u32>, Query, description = "Records per page (default 50, max 200)")
+    ),
+    responses(
+        (status = 200, description = "Paginated list of soft-deleted vaults", body = PagedResponse<VaultRecord>),
+        (status = 403, description = "Admin privileges required")
+    ),
+    tag = "Vaults"
+)]
+pub async fn list_deleted_vaults_handler(
+    State(state): State<Arc<crate::AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Query(query): Query<ListDeletedVaultsQuery>,
+) -> Result<Json<crate::db::models::PagedResponse<VaultRecord>>, AppError> {
+    require_admin(&user)?;
+    let pagination = crate::db::models::PaginationParams {
+        page: query.page,
+        page_size: query.page_size,
+    };
+    let (limit, offset) = pagination.to_limit_offset();
+
+    let (data, total_count) = match &query.manager_id {
+        Some(manager_id) => state
+            .vault_store
+            .vaults
+            .list_deleted_by_manager(manager_id, limit, offset)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        None => state
+            .vault_store
+            .vaults
+            .list_all_deleted(limit, offset)
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    };
+
+    let page = pagination.page.max(1);
+    let page_size = pagination
+        .page_size
+        .clamp(1, crate::db::models::PaginationParams::MAX_PAGE_SIZE);
+    let has_more = offset + limit < total_count;
+
+    Ok(Json(crate::db::models::PagedResponse {
+        data,
+        total_count,
+        page,
+        page_size,
+        has_more,
+    }))
 }
 
 #[cfg(test)]
@@ -367,14 +591,15 @@ mod tests {
                 version INTEGER NOT NULL DEFAULT 1,
                 idempotency_key TEXT,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                deleted_at TIMESTAMP
             )
             "#,
         )
         .execute(&pool)
         .await
         .unwrap();
-        VaultStore::new(pool)
+        VaultStore::new(db::schema::TypedSchema::new(std::sync::Arc::new(pool)).vaults())
     }
 
     #[tokio::test]
@@ -575,7 +800,7 @@ mod tests {
         // Only one vault should exist for this manager.
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 1);
@@ -613,7 +838,7 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);
@@ -649,9 +874,303 @@ mod tests {
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM vaults WHERE manager_id = ?1")
             .bind("mgr-1")
-            .fetch_one(&store.pool)
+            .fetch_one(store.vaults.pool())
             .await
             .unwrap();
         assert_eq!(count.0, 2);
+    }
+
+    // ── BE-023: policy expiry on vault operations ────────────────────────
+
+    /// Build a policy JSON expiring at `expires_at`.
+    fn policy_expiring(expires_at: &str) -> String {
+        format!(r#"{{"policy":{{"expires_at":"{expires_at}"}}}}"#)
+    }
+
+    async fn vault_with_policy(store: &VaultStore, config_json: &str) -> VaultRecord {
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-1".into(),
+                name: "Policy vault".into(),
+                status: "active".into(),
+                config_json: config_json.to_string(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The acceptance criterion from BE-023: create a vault, let its policy
+    /// expire, attempt an operation, expect rejection.
+    #[tokio::test]
+    async fn an_expired_policy_blocks_a_vault_operation() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2020-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        let err = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now())
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::policy_expiry::PolicyExpiryError::PolicyExpired { .. }
+        ));
+
+        // And the handler layer turns that into a 403, not a 400 or a 500.
+        let app_err: AppError = err.into();
+        assert!(matches!(app_err, AppError::PolicyExpired(_)));
+    }
+
+    #[tokio::test]
+    async fn an_unexpired_policy_permits_a_vault_operation() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2099-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        assert!(
+            crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now()).is_ok()
+        );
+
+        // The operation itself still goes through.
+        let updated = store
+            .update(
+                &vault.id,
+                &UpdateVaultRequest {
+                    version: stored.version,
+                    name: Some("Renamed".into()),
+                    status: None,
+                    config_json: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "Renamed");
+    }
+
+    /// Existing vaults were created with `config_json = "{}"` and must keep
+    /// working — expiry is opt-in.
+    #[tokio::test]
+    async fn a_vault_without_an_expiry_is_unaffected() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, "{}").await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        assert!(
+            crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now()).is_ok()
+        );
+    }
+
+    /// The guard reads the *stored* policy, so an expired vault cannot be
+    /// used to extend its own expiry.
+    #[tokio::test]
+    async fn an_expired_policy_cannot_extend_itself() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, &policy_expiring("2020-01-01T00:00:00Z")).await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+
+        // What the handler checks, before applying any update.
+        let guard = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now());
+
+        assert!(
+            guard.is_err(),
+            "the stored policy is expired, so the update must be refused \
+             regardless of what the request body would set it to"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_policy_is_refused_as_a_bad_request() {
+        let store = test_store().await;
+        let vault = vault_with_policy(&store, "{not json").await;
+
+        let stored = store.get(&vault.id).await.unwrap();
+        let err = crate::policy_expiry::ensure_policy_active(&stored.config_json, Utc::now())
+            .unwrap_err();
+
+        let app_err: AppError = err.into();
+        assert!(matches!(app_err, AppError::BadRequest(_)));
+    }
+
+    // ── BE-027: pagination ────────────────────────────────────────────────────
+
+    fn pagination(page: u32, page_size: u32) -> crate::db::models::PaginationParams {
+        crate::db::models::PaginationParams { page, page_size }
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_paginated_basic() {
+        let store = test_store().await;
+
+        for i in 0..5u32 {
+            store
+                .create(&CreateVaultRequest {
+                    manager_id: "mgr-pg".into(),
+                    name: format!("Vault {i}"),
+                    status: "active".into(),
+                    config_json: "{}".into(),
+                    idempotency_key: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let page1 = store
+            .list_by_manager("mgr-pg", &pagination(1, 2))
+            .await
+            .unwrap();
+        assert_eq!(page1.data.len(), 2);
+        assert_eq!(page1.total_count, 5);
+        assert_eq!(page1.page, 1);
+        assert_eq!(page1.page_size, 2);
+        assert!(page1.has_more);
+
+        let page2 = store
+            .list_by_manager("mgr-pg", &pagination(2, 2))
+            .await
+            .unwrap();
+        assert_eq!(page2.data.len(), 2);
+        assert!(page2.has_more);
+
+        let page3 = store
+            .list_by_manager("mgr-pg", &pagination(3, 2))
+            .await
+            .unwrap();
+        assert_eq!(page3.data.len(), 1);
+        assert!(!page3.has_more);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_paginated_empty_for_unknown_manager() {
+        let store = test_store().await;
+        let result = store
+            .list_by_manager("unknown-mgr", &pagination(1, 50))
+            .await
+            .unwrap();
+        assert!(result.data.is_empty());
+        assert_eq!(result.total_count, 0);
+        assert!(!result.has_more);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_page_size_clamped_to_max() {
+        let store = test_store().await;
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-clamp".into(),
+                name: "Vault".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let result = store
+            .list_by_manager("mgr-clamp", &pagination(1, 9999))
+            .await
+            .unwrap();
+        assert_eq!(result.page_size, 200);
+        assert_eq!(result.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn list_by_manager_beyond_last_page_returns_empty() {
+        let store = test_store().await;
+        store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-eof".into(),
+                name: "Vault".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        let result = store
+            .list_by_manager("mgr-eof", &pagination(10, 50))
+            .await
+            .unwrap();
+        assert!(result.data.is_empty());
+        assert_eq!(result.total_count, 1);
+        assert!(!result.has_more);
+    }
+
+    // ── BE-044 (#281): soft deletes ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn soft_delete_excludes_vault_from_default_listing() {
+        let store = test_store().await;
+        let created = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-soft".into(),
+                name: "To Delete".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        store.soft_delete(&created.id).await.unwrap();
+
+        // Default `get` no longer finds the vault.
+        assert!(store.get(&created.id).await.is_err());
+
+        // Default listing excludes it.
+        let listed = store
+            .list_by_manager("mgr-soft", &pagination(1, 50))
+            .await
+            .unwrap();
+        assert!(listed.data.is_empty());
+        assert_eq!(listed.total_count, 0);
+
+        // It can still be located via the admin-inclusive path.
+        let fetched = store.get_including_deleted(&created.id).await.unwrap();
+        assert!(fetched.deleted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_returns_vault_to_default_queries() {
+        let store = test_store().await;
+        let created = store
+            .create(&CreateVaultRequest {
+                manager_id: "mgr-restore".into(),
+                name: "Restore Me".into(),
+                status: "active".into(),
+                config_json: "{}".into(),
+                idempotency_key: None,
+            })
+            .await
+            .unwrap();
+
+        store.soft_delete(&created.id).await.unwrap();
+        assert!(store.get(&created.id).await.is_err());
+
+        let restored = store.restore(&created.id).await.unwrap();
+        assert!(restored.deleted_at.is_none());
+
+        // Default `get` works again.
+        let fetched = store.get(&created.id).await.unwrap();
+        assert_eq!(fetched.id, created.id);
+
+        // And it reappears in the default listing.
+        let listed = store
+            .list_by_manager("mgr-restore", &pagination(1, 50))
+            .await
+            .unwrap();
+        assert_eq!(listed.total_count, 1);
+    }
+
+    #[tokio::test]
+    async fn soft_delete_of_missing_vault_is_not_found() {
+        let store = test_store().await;
+        assert!(store.soft_delete("does-not-exist").await.is_err());
+        assert!(store.restore("does-not-exist").await.is_err());
     }
 }

@@ -167,6 +167,8 @@ pub enum JobResult {
         comparison: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reconciliation: Option<ReconciliationReport>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        insights: Option<crate::insights::InsightsReport>,
     },
     Failed {
         error: String,
@@ -867,6 +869,7 @@ pub struct JobWorker {
     queue: JobQueue,
     engine: SimulationEngine,
     insights_engine: InsightsEngine,
+    insights_cache: Arc<crate::cache::InsightsCache>,
     config: JobQueueConfig,
     http_client: Client,
     /// Optional pub/sub bus for real-time WebSocket streaming.
@@ -881,12 +884,14 @@ impl JobWorker {
         queue: JobQueue,
         engine: SimulationEngine,
         insights_engine: InsightsEngine,
+        insights_cache: Arc<crate::cache::InsightsCache>,
         config: JobQueueConfig,
     ) -> Self {
         Self {
             queue,
             engine,
             insights_engine,
+            insights_cache,
             config,
             http_client: Client::new(),
             bus: None,
@@ -967,6 +972,7 @@ impl JobWorker {
                     let queue = self.queue.clone();
                     let engine = self.engine.clone();
                     let insights = self.insights_engine.clone();
+                    let insights_cache = self.insights_cache.clone();
                     let config = self.config.clone();
                     let http_client = self.http_client.clone();
                     let bus = self.bus.clone();
@@ -981,6 +987,7 @@ impl JobWorker {
                             job_id,
                             engine,
                             insights,
+                            insights_cache,
                             config,
                             http_client,
                             bus,
@@ -1015,6 +1022,7 @@ impl JobWorker {
         job_id: JobId,
         engine: SimulationEngine,
         insights_engine: InsightsEngine,
+        insights_cache: Arc<crate::cache::InsightsCache>,
         config: JobQueueConfig,
         http_client: Client,
         bus: Option<Arc<SimulationBus>>,
@@ -1036,7 +1044,7 @@ impl JobWorker {
         let timeout = Duration::from_secs(job.timeout_secs as u64);
         let result = tokio::time::timeout(
             timeout,
-            Self::execute_job(&job, &engine, &insights_engine, queue, bus.clone(), reconciler),
+            Self::execute_job(&job, &engine, &insights_engine, &insights_cache, queue, bus.clone(), reconciler),
         )
         .await;
 
@@ -1137,6 +1145,7 @@ impl JobWorker {
         job: &Job,
         engine: &SimulationEngine,
         insights_engine: &InsightsEngine,
+        insights_cache: &Arc<crate::cache::InsightsCache>,
         queue: &JobQueue,
         bus: Option<Arc<SimulationBus>>,
         reconciler: Option<Arc<FeeReconciler>>,
@@ -1204,7 +1213,19 @@ impl JobWorker {
                 }
 
                 progress!(70, "Generating insights");
-                let _insights = insights_engine.analyze(&sim_result.resources);
+                let cache_key = crate::cache::SimulationCache::generate_key(
+                    &contract_id,
+                    &function_name,
+                    &args.clone().unwrap_or_default(),
+                );
+                
+                let insights = if let Some(cached_insights) = insights_cache.get(&cache_key).await {
+                    cached_insights
+                } else {
+                    let generated = insights_engine.analyze(&sim_result.resources);
+                    insights_cache.set(cache_key, generated.clone()).await;
+                    generated
+                };
 
                 progress!(90, "Finalizing results");
 
@@ -1214,6 +1235,7 @@ impl JobWorker {
                     optimization: None,
                     comparison: None,
                     reconciliation: None,
+                    insights: Some(insights),
                 })
             }
             JobPayload::OptimizeLimits {
@@ -1236,6 +1258,7 @@ impl JobWorker {
                     optimization: Some(serde_json::to_value(report)?),
                     comparison: None,
                     reconciliation: None,
+                    insights: None,
                 })
             }
             JobPayload::Reconcile {
@@ -1281,6 +1304,7 @@ impl JobWorker {
                     optimization: None,
                     comparison: None,
                     reconciliation: Some(report),
+                    insights: None,
                 })
             }
             _ => Ok(JobResult::Success {
@@ -1289,6 +1313,7 @@ impl JobWorker {
                 optimization: None,
                 comparison: Some(serde_json::json!({"status": "Not fully implemented"})),
                 reconciliation: None,
+                insights: None,
             }),
         }
     }

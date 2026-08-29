@@ -15,6 +15,7 @@
 //! places) in a future iteration.
 
 use crate::db;
+use std::str::FromStr;
 use crate::fee_analytics::FeeAnalyticsEngine;
 use crate::fee_store::FeeStore;
 use crate::jobs::{JobId, JobQueue};
@@ -41,75 +42,15 @@ pub enum DiscrepancySeverity {
     Critical,
 }
 
-/// A single fee discrepancy between predicted and actual
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
-pub struct Discrepancy {
-    pub id: String,
-    pub report_id: String,
-    pub ledger_sequence: i64,
-    pub expected_fee: i64,
-    pub actual_fee: i64,
-    pub delta: i64,
-    pub delta_pct: f64,
-    pub severity: String,
-}
-
-/// Summary statistics for a reconciliation report
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ReconciliationSummary {
-    pub mean_delta_pct: f64,
-    pub median_delta_pct: f64,
-    pub std_dev_delta_pct: f64,
-    pub ledgers_with_critical: i64,
-    pub ledgers_with_warning: i64,
-}
-
-/// A completed reconciliation report
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ReconciliationReport {
-    pub id: String,
-    pub from_ledger: i64,
-    pub to_ledger: i64,
-    pub tolerance_pct: f64,
-    pub total_ledgers: i32,
-    pub discrepancies_count: i32,
-    pub avg_delta_pct: f64,
-    pub max_delta_pct: f64,
-    pub summary: Option<ReconciliationSummary>,
-    pub created_at: String,
-}
-
-/// Request to start a reconciliation job
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ReconcileRequest {
-    pub from_ledger: i64,
-    pub to_ledger: i64,
-    #[serde(default = "default_tolerance")]
-    pub tolerance_pct: f64,
-}
-
-fn default_tolerance() -> f64 {
-    5.0
-}
-
-/// Response from submitting a reconciliation job
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ReconcileResponse {
-    pub job_id: String,
-    pub status: String,
-    pub message: String,
-}
-
-/// Query params for listing reconciliation reports
-#[derive(Debug, Deserialize)]
-pub struct ListReportsQuery {
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-}
-
-fn default_limit() -> i64 {
-    10
-}
+/// The reconciliation DTOs live in [`crate::db::models`]; the typed DB layer
+/// returns them directly. They were duplicated here field-for-field, which is
+/// what made `FeeReconciler` build one `ReconciliationReport` while the repo
+/// expected the other. `DiscrepancySeverity` above stays local — the DB layer
+/// stores severity as a plain string and has no equivalent enum.
+pub use crate::db::models::{
+    Discrepancy, ListReportsQuery, ReconcileRequest, ReconcileResponse, ReconciliationReport,
+    ReconciliationSummary,
+};
 
 /// Fee reconciliation engine that compares predictions against actuals
 pub struct FeeReconciler {
@@ -268,7 +209,9 @@ impl FeeReconciler {
             .count() as i64;
 
         let summary = ReconciliationSummary {
-            mean_delta_pct,
+            // The local binding is `avg_delta_pct`; the DTO field is
+            // `mean_delta_pct`. Same statistic, different name.
+            mean_delta_pct: avg_delta_pct,
             median_delta_pct,
             std_dev_delta_pct,
             ledgers_with_critical,
@@ -435,6 +378,10 @@ pub async fn list_reports_handler(
     State(state): State<Arc<crate::AppState>>,
     Query(params): Query<ListReportsQuery>,
 ) -> Result<Json<Vec<ReconciliationReport>>, AppError> {
-    let reports = state.reconciliation_repo.list(params.limit).await?;
+    let reports = state
+        .reconciliation_repo
+        .list(params.limit)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(reports))
 }

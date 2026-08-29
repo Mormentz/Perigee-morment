@@ -1,0 +1,110 @@
+name: E2E — API against Stellar testnet
+
+# API-40 (#356): End-to-end test suite covering provision → report → reconcile.
+#
+# This workflow:
+#   1. Builds the Perigee Rust backend.
+#   2. Spins it up against a SQLite database.
+#   3. Runs tests/e2e/api.e2e.test.mjs using the built-in node:test runner.
+#
+# The suite calls:
+#   • POST  /vaults             (provision)
+#   • GET   /fees/analytics     (report)
+#   • POST  /reconcile          (trigger reconcile)
+#   • GET   /reconcile/:job_id  (poll job)
+#   • GET   /reconcile/reports  (list reports)
+#
+# Network: https://soroban-testnet.stellar.org (public, no key needed for reads)
+#
+# Secrets required (set in repo Settings → Secrets → Actions):
+#   E2E_STELLAR_ADDRESS  — a testnet Stellar public key (G…).
+#                          Does not need a funded balance for these tests.
+
+on:
+  push:
+    branches:
+      - "feat/api-40-e2e-testnet-suite"
+      - main
+  pull_request:
+    paths:
+      - "core/**"
+      - "tests/e2e/**"
+      - ".github/workflows/e2e-testnet.yml"
+
+jobs:
+  e2e-testnet:
+    name: E2E against Stellar testnet
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # API server
+      API_BASE_URL: http://localhost:8080
+      DATABASE_URL: sqlite://e2e_test.db
+      SOROBAN_RPC_URL: https://soroban-testnet.stellar.org
+      NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
+      APP_ENV: development
+      RUST_LOG: warn
+      FEE_ANALYSIS_ENABLED: "true"
+
+      # Test tuning
+      MANAGER_STELLAR_ADDRESS: ${{ secrets.E2E_STELLAR_ADDRESS || 'GDUMMY000TESTNET0ADDRESS00000000000000000000000000000000A' }}
+      RECONCILE_TIMEOUT_MS: "60000"
+      RECONCILE_TOLERANCE_PCT: "15"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Rust toolchain ────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      # ── Build backend ─────────────────────────────────────────────────────
+      - name: Build Perigee core
+        run: cargo build --package Perigee-core --release
+
+      # ── Start backend ─────────────────────────────────────────────────────
+      - name: Start Perigee API server
+        run: |
+          ./target/release/Perigee-core &
+          echo "BACKEND_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for API to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health; then
+              echo "API is ready."
+              exit 0
+            fi
+            echo "Waiting for API… (attempt $i/30)"
+            sleep 2
+          done
+          echo "API did not become healthy in time." >&2
+          exit 1
+
+      # ── Run e2e tests ─────────────────────────────────────────────────────
+      - name: Run e2e test suite
+        run: node --test --test-reporter=spec tests/e2e/api.e2e.test.mjs
+
+      # ── Teardown ──────────────────────────────────────────────────────────
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ -n "$BACKEND_PID" ]; then
+            kill "$BACKEND_PID" || true
+          fi
+
+      - name: Upload test artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-logs
+          path: |
+            e2e_test.db
+          retention-days: 3
