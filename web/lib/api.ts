@@ -38,6 +38,7 @@ export const API_URL = isProduction ? "/api" : configuredUrl;
 export const apiConfig = {
   baseUrl: API_URL,
   environment: process.env.NODE_ENV ?? "development",
+  apiVersion: "v1",
 };
 
 export interface ApiRequestOptions extends Omit<RequestInit, "body"> {
@@ -179,6 +180,10 @@ async function request<T>(
 
   if (!requestHeaders.has("Accept")) {
     requestHeaders.set("Accept", "application/json");
+  }
+
+  if (!requestHeaders.has("X-API-Version")) {
+    requestHeaders.set("X-API-Version", apiConfig.apiVersion);
   }
 
   if (token && !requestHeaders.has("Authorization")) {
