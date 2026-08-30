@@ -285,8 +285,24 @@ async fn verify_ownership(
         .find_by_stellar_address(&user.stellar_address)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| AppError::Unauthorized("Manager not found for authenticated user".into()))?;
+        .ok_or_else(|| {
+            crate::audit_log::log_security_event(
+                crate::audit_log::SecurityEventType::VaultAccessDenied,
+                Some(&user.stellar_address),
+                None,
+                None,
+                Some("Manager not found for authenticated user"),
+            );
+            AppError::Unauthorized("Manager not found for authenticated user".into())
+        })?;
     if manager.id != manager_id {
+        crate::audit_log::log_security_event(
+            crate::audit_log::SecurityEventType::VaultAccessDenied,
+            Some(&user.stellar_address),
+            None,
+            None,
+            Some("Agent not authorized for vault: manager mismatch"),
+        );
         return Err(AppError::Unauthorized(
             "You can only access vaults belonging to your own manager account".into(),
         ));
@@ -374,6 +390,13 @@ pub async fn create_vault_handler(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !approved {
+        crate::audit_log::log_security_event(
+            crate::audit_log::SecurityEventType::VaultAccessDenied,
+            Some(&user.stellar_address),
+            None,
+            None,
+            Some("Manager is not approved to create vaults"),
+        );
         return Err(AppError::BadRequest(
             "Manager is not approved. Only approved managers may create vaults. Register via /managers/register and wait for approval.".into(),
         ));
