@@ -1,7 +1,7 @@
 use soroban_sdk::{contracttype, Address, String, Vec};
 
 #[derive(Clone)]
-#[contracttype]
+#contracttype]
 pub enum ProposalState {
     Draft,
     Voting,
@@ -11,7 +11,7 @@ pub enum ProposalState {
 }
 
 #[derive(Clone)]
-#[contracttype]
+#contracttype]
 pub struct ProposalAction {
     pub contract_id: Address,
     pub function_name: String,
@@ -19,7 +19,7 @@ pub struct ProposalAction {
 }
 
 #[derive(Clone)]
-#[contracttype]
+#contracttype]
 pub struct Proposal {
     pub id: u32,
     pub proposer: Address,
@@ -37,7 +37,7 @@ pub struct Proposal {
 }
 
 #[derive(Clone)]
-#[contracttype]
+#contracttype]
 pub struct GovernanceConfig {
     pub admin: Address,
     pub voting_period: u64, // in seconds
@@ -47,12 +47,21 @@ pub struct GovernanceConfig {
 }
 
 #[derive(Clone)]
-#[contracttype]
+#contracttype]
+pub struct VotingReceipt {
+    pub voting_units_snapshot: i128,
+    pub credits_spent: i128,
+}
+
+#[derive(Clone)]
+#contracttype]
 pub enum DataKey {
     Proposal(u32),
     VotingPower(Address),
     DelegatedPower(Address), // delegator -> delegate
     Delegate(Address), // delegate -> total delegated power
     Config,
-    HasVoted(u32, Address), // proposal_id, voter -> has_voted
+    HasVoted(u32, Address), // proposal_id, toter -> has_voted
+    Receipt(u32, Address), // proposal_id, voter -> VotingReceipt
+    TotalCreditsSpent(Address), // voter -> total credits spent across all proposals
 }
