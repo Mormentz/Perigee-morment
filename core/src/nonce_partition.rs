@@ -39,6 +39,12 @@ pub struct NoncePartition {
     exhausted: Vec<String>,
 }
 
+impl Default for NoncePartition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NoncePartition {
     pub fn new() -> Self {
         Self {
@@ -93,7 +99,7 @@ impl NoncePartition {
     pub fn assign_nonce(&mut self, domain: &str) -> Result<u64, &'static str> {
         let candidate = self.next_assignable(domain);
 
-        if candidate >= NONCE_MAX {
+        if candidate == NONCE_MAX {
             if !self.exhausted.contains(&domain.to_string()) {
                 self.exhausted.push(domain.to_string());
             }

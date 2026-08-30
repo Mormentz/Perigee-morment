@@ -5,10 +5,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::de::DeserializeOwned;
 use std::env;
 use thiserror::Error;
-use utoipa::ToSchema;
 
 use crate::simulation::SimulationError;
 

@@ -8,6 +8,7 @@ mod cache;
 mod comparison;
 mod config;
 mod db;
+mod error_codes;
 mod errors;
 pub mod fee_analytics;
 pub mod fee_collector;
@@ -59,8 +60,6 @@ use crate::fee_store::FeeStore;
 use crate::gas_golfing::{GasGolfingAnalyzer, GasGolfingReport};
 use crate::insights::InsightsEngine;
 use crate::jobs::{JobQueue, JobQueueConfig, JobWorker};
-use crate::merkle_tree::MerkleTree;
-use crate::reconciliation::FeeReconciler;
 use crate::rpc_provider::{ProviderRegistry, RegistryConfig, RegistrySnapshot, RpcProvider};
 use crate::simulation::{SimulationEngine, SimulationMode, SimulationResult, SorobanResources};
 use crate::stellar_service::{StellarService, StellarServiceConfig};
@@ -334,14 +333,13 @@ fn validate_config_secrets(config: &AppConfig) -> Result<(), String> {
     }
 
     // 4. REGISTRY_PUBLIC_URL — optional but, if set, must be a valid URL.
-    if !config.registry_public_url.trim().is_empty() {
-        if reqwest::Url::parse(&config.registry_public_url).is_err() {
+    if !config.registry_public_url.trim().is_empty()
+        && reqwest::Url::parse(&config.registry_public_url).is_err() {
             return Err(format!(
                 "REGISTRY_PUBLIC_URL is not a valid URL: '{}'",
                 config.registry_public_url
             ));
         }
-    }
 
     // 5. REGISTRY_SEED_PEERS — every URL must be parseable.
     for peer in parse_seed_peers(&config.registry_seed_peers) {

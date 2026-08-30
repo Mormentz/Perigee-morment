@@ -39,6 +39,12 @@ pub struct HealthAttestationService {
     attestations: HashMap<String, HealthStatus>,
 }
 
+impl Default for HealthAttestationService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthAttestationService {
     pub fn new() -> Self {
         Self {

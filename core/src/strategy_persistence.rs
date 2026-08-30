@@ -24,8 +24,15 @@ struct PersistedState {
     checksum: String,
 }
 
+#[derive(Debug)]
 pub struct StrategyStateManager {
     states: HashMap<String, StrategyState>,
+}
+
+impl Default for StrategyStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StrategyStateManager {
@@ -57,8 +64,9 @@ impl StrategyStateManager {
     }
 
     pub fn persist_to_bytes(&self) -> Vec<u8> {
-        self.serialized_state()
-            .and_then(|state| serde_json::to_vec(&state).map_err(io::Error::other))
+        let state = self.serialized_state()
+            .expect("serialization of StrategyState map should not fail");
+        serde_json::to_vec(&state)
             .expect("serialization of StrategyState map should not fail")
     }
 
@@ -152,13 +160,14 @@ fn checksum(data: &[u8]) -> String {
 fn canonical_state_bytes(
     states: &HashMap<String, StrategyState>,
 ) -> Result<Vec<u8>, serde_json::Error> {
-    let sorted_states: BTreeMap<_, _> = states.iter().map(|(key, value)| (key, value)).collect();
+    let sorted_states: BTreeMap<_, _> = states.iter().collect();
     serde_json::to_vec(&sorted_states)
 }
 
-fn backup_paths(path: &Path, max_backups: usize) -> impl Iterator<Item = PathBuf> {
+fn backup_paths(path: &Path, max_backups: usize) -> Vec<PathBuf> {
     (1..=max_backups)
         .map(|index| PathBuf::from(format!("{}.bak.{}", path.display(), index)))
+        .collect()
 }
 
 fn rotate_backups(path: &Path, max_backups: usize) -> io::Result<()> {
@@ -273,7 +282,7 @@ mod tests {
             evaluation_count: 1,
         });
         let mut bytes = mgr.persist_to_bytes();
-        let checksum_byte = bytes.len() - 2;
+        let checksum_byte = bytes.len() - 3;
         bytes[checksum_byte] = b'0';
 
         let error = StrategyStateManager::restore_from_bytes(&bytes).unwrap_err();
