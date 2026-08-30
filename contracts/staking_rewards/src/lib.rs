@@ -1,6 +1,9 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec, vec};
 
+use emergency_guard::{DefaultEmergencyGuard, EmergencyGuard, EmergencyGuardTrait, PauseType};
+pub use Perigee_error_codes::ContractError;
+use Perigee_math::Fixed;
 pub use Perigee_error_codes::ContractError;
 use Perigee_math::Fixed;
 use emergency_guard::{DefaultEmergencyGuard, PauseType};
