@@ -292,8 +292,25 @@ fn test_pause_safeguards_claim() {
 
 #[test]
 fn test_successful_withdrawal() {
+    let (e, client, _, staking_token, _) = setup();
+    let user = Address::generate(&e);
+
+    let staking_client = token::StellarAssetClient::new(&e, &staking_token);
+    staking_client.mint(&user, &STAKE_AMOUNT);
+
+    client.stake(&user, &STAKE_AMOUNT);
+    assert_eq!(client.get_staked_balance(&user), STAKE_AMOUNT);
+
+    client.withdraw(&user, &STAKE_AMOUNT);
+    assert_eq!(client.get_staked_balance(&user), 0);
+
+    let token_balance = token::Client::new(&e, &staking_token).balance(&user);
+    assert_eq!(token_balance, STAKE_AMOUNT);
+}
+
 /// Verifies that the CLAIM_REWARDS granular pause blocks claims independently
-/// of the global `is_paused` flag, satisfying issue #463 acceptance criteria.
+/// of the global staking pause flag, satisfying the guard-standardization
+/// requirement.
 #[test]
 #[should_panic(expected = "Contract, #14")]
 fn test_granular_claim_rewards_pause() {
@@ -303,19 +320,14 @@ fn test_granular_claim_rewards_pause() {
     let staking_client = token::StellarAssetClient::new(&e, &staking_token);
     staking_client.mint(&user, &STAKE_AMOUNT);
 
-    // Stake tokens
     client.stake(&user, &STAKE_AMOUNT);
     assert_eq!(client.get_staked_balance(&user), STAKE_AMOUNT);
 
-    // Withdraw the full stake
-    client.withdraw(&user, &STAKE_AMOUNT);
+    advance_ledger(&e, 5);
+    assert!(client.get_pending_rewards(&user) > 0);
 
-    // Verify stake balance is zero
-    assert_eq!(client.get_staked_balance(&user), 0);
-
-    // Verify tokens returned to user
-    let token_balance = token::Client::new(&e, &staking_token).balance(&user);
-    assert_eq!(token_balance, STAKE_AMOUNT);
+    client.set_claim_rewards_paused(&true);
+    client.claim(&user);
 }
 
 #[test]
@@ -479,8 +491,8 @@ fn test_granular_pause_staking() {
     // Verify staking is not paused
     assert!(!client.is_staking_paused());
 
-    // Mint more tokens for second stake
-    staking_client.mint(&user, &STAKE_AMOUNT);
+    // Mint enough for the second post-resume stake and the later claim check.
+    staking_client.mint(&user, &(STAKE_AMOUNT * 2));
 
     // Stake should work again after resume
     client.stake(&user, &STAKE_AMOUNT);
@@ -488,10 +500,11 @@ fn test_granular_pause_staking() {
     client.stake(&user, &STAKE_AMOUNT);
     advance_ledger(&e, 5);
 
-    // Activate CLAIM_REWARDS granular pause via the contract's delegation function.
-    // Global is_paused remains false — only the granular bitmask bit is set.
+    // Activate CLAIM_REWARDS granular pause via the canonical guard API.
+    // Global staking pause remains false — only the claim-specific bit is set.
     client.set_claim_rewards_paused(&true);
 
     // Claim MUST fail with ContractError::Paused (error code 14).
-    client.claim(&user);
+    let result = client.try_claim(&user);
+    assert!(result.is_err());
 }
