@@ -18,7 +18,6 @@ use crate::db;
 use std::str::FromStr;
 use crate::fee_analytics::FeeAnalyticsEngine;
 use crate::fee_store::FeeStore;
-use crate::jobs::{JobId, JobQueue};
 use crate::AppError;
 use axum::{
     extract::{Path, Query, State},
@@ -183,7 +182,7 @@ impl FeeReconciler {
             0.0
         } else {
             let mid = sorted_deltas.len() / 2;
-            if sorted_deltas.len() % 2 == 0 {
+            if sorted_deltas.len().is_multiple_of(2) {
                 (sorted_deltas[mid - 1] + sorted_deltas[mid]) / 2.0
             } else {
                 sorted_deltas[mid]

@@ -1171,11 +1171,12 @@ impl JobWorker {
             } => {
                 progress!(30, "Running simulation");
 
+                let args_ref = args.as_ref().cloned().unwrap_or_default();
                 let sim_result = engine
                     .simulate_from_contract_id(
                         &contract_id,
                         &function_name,
-                        args.unwrap_or_default(),
+                        args_ref,
                         ledger_overrides,
                         None,
                         None,
@@ -1216,7 +1217,7 @@ impl JobWorker {
                 let cache_key = crate::cache::SimulationCache::generate_key(
                     &contract_id,
                     &function_name,
-                    &args.clone().unwrap_or_default(),
+                    &args.as_ref().cloned().unwrap_or_default(),
                 );
                 
                 let insights = if let Some(cached_insights) = insights_cache.get(&cache_key).await {

@@ -39,9 +39,8 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use serde_json;
 use tower::{Layer, Service};
-use tracing::{info, Span};
+use tracing::info;
 use uuid::Uuid;
 
 use crate::metrics::Metrics;

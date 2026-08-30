@@ -87,6 +87,12 @@ pub struct RecoveryResult {
     pub action: String,
 }
 
+impl Default for Reconciler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Reconciler {
     pub fn new() -> Self {
         Self {
@@ -129,7 +135,7 @@ impl Reconciler {
 
     pub fn recover_orphaned(&mut self) -> Vec<RecoveryResult> {
         let mut results = Vec::new();
-        let now = Utc::now();
+        let _now = Utc::now();
         for tx in &mut self.pending_txs {
             if tx.phase == TxPhase::Prepared && tx.is_stale() {
                 tracing::warn!(

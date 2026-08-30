@@ -87,6 +87,12 @@ pub struct TriggerConfigVersioner {
     changes: broadcast::Sender<ConfigChangeEvent>,
 }
 
+impl Default for TriggerConfigVersioner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TriggerConfigVersioner {
     pub fn new() -> Self {
         let (changes, _) = broadcast::channel(CONFIG_BUS_CAPACITY);
@@ -165,7 +171,7 @@ impl TriggerConfigVersioner {
         time: DateTime<Utc>,
     ) -> Option<&VersionedTriggerConfig> {
         let configs = self.versions.get(trigger_type)?;
-        configs.iter().filter(|c| c.created_at <= time).last()
+        configs.iter().rfind(|c| c.created_at <= time)
     }
 
     pub fn snapshot_for_vault(

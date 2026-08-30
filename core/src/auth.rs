@@ -1,3 +1,4 @@
+use crate::audit_log::{log_audit_event, log_security_event, SecurityEventType};
 use crate::errors::AppError;
 use axum::{extract::Request, http::header, middleware::Next, response::Response, Extension, Json};
 use base64::{
@@ -145,7 +146,7 @@ impl AuthState {
         let n = BASE64_URL.encode(pub_key.n().to_bytes_be());
         let e = BASE64_URL.encode(pub_key.e().to_bytes_be());
 
-        Self {
+        let state = Self {
             encoding_key,
             decoding_key,
             jwk_n: n,
@@ -156,7 +157,17 @@ impl AuthState {
             emergency_verification_paused: Arc::new(AtomicBool::new(emergency_verification_paused)),
             refresh_tokens: Arc::new(RwLock::new(HashMap::new())),
             rate_limiter: Mutex::new(HashMap::new()),
-        }
+        };
+
+        log_security_event(
+            SecurityEventType::JwtKeyRotated,
+            Some(&state.server_stellar_address()),
+            None,
+            None,
+            Some("JWT signing key initialized or rotated"),
+        );
+
+        state
     }
 
     pub fn server_stellar_address(&self) -> String {
@@ -351,6 +362,13 @@ pub(crate) fn rotate_refresh_token(
                             fid != &family_id
                         }
                     });
+                    log_security_event(
+                        SecurityEventType::TokenExpired,
+                        Some(&subject),
+                        None,
+                        None,
+                        Some("Refresh token expired"),
+                    );
                     return Err(AppError::Unauthorized("Refresh token expired".into()));
                 }
                 // Leave a tombstone so reuse can be detected.
@@ -372,11 +390,25 @@ pub(crate) fn rotate_refresh_token(
                     RefreshTokenRecord::Active { family_id: fid, .. }
                     | RefreshTokenRecord::Rotated { family_id: fid, .. } => fid != &family_id,
                 });
+                log_security_event(
+                    SecurityEventType::TokenRevoked,
+                    None,
+                    None,
+                    None,
+                    Some("Refresh token reuse detected; revoked rotation family"),
+                );
                 return Err(AppError::Unauthorized(
                     "Refresh token reuse detected; re-authenticate".into(),
                 ));
             }
             None => {
+                log_security_event(
+                    SecurityEventType::UnauthorizedAccess,
+                    None,
+                    None,
+                    None,
+                    Some("Invalid or already-rotated refresh token"),
+                );
                 return Err(AppError::Unauthorized(
                     "Invalid or already-rotated refresh token".into(),
                 ));
@@ -384,7 +416,15 @@ pub(crate) fn rotate_refresh_token(
         }
     };
 
-    issue_token_pair_in_family(state, &subject, &family_id)
+    let response = issue_token_pair_in_family(state, &subject, &family_id)?;
+    log_security_event(
+        SecurityEventType::TokenRefreshed,
+        Some(&subject),
+        None,
+        None,
+        Some("Refresh token rotated and new JWT access token issued"),
+    );
+    Ok(response)
 }
 
 /// Revoke every refresh token in the same rotation family as `refresh_token`.
@@ -395,15 +435,22 @@ pub(crate) fn revoke_refresh_token(state: &AuthState, refresh_token: &str) -> Re
         .write()
         .map_err(|_| AppError::Internal("Refresh token store lock poisoned".into()))?;
 
-    let family_id = store.get(&token_hash).map(|r| match r {
-        RefreshTokenRecord::Active { family_id, .. }
-        | RefreshTokenRecord::Rotated { family_id, .. } => family_id.clone(),
+    let found = store.get(&token_hash).map(|r| match r {
+        RefreshTokenRecord::Active { family_id, subject, .. } => (family_id.clone(), Some(subject.clone())),
+        RefreshTokenRecord::Rotated { family_id, .. } => (family_id.clone(), None),
     });
-    if let Some(family_id) = family_id {
+    if let Some((family_id, subject)) = found {
         store.retain(|_, r| match r {
             RefreshTokenRecord::Active { family_id: fid, .. }
             | RefreshTokenRecord::Rotated { family_id: fid, .. } => fid != &family_id,
         });
+        log_security_event(
+            SecurityEventType::TokenRevoked,
+            subject.as_deref(),
+            None,
+            None,
+            Some("Refresh token family explicitly revoked"),
+        );
     }
     Ok(())
 }
@@ -671,13 +718,53 @@ pub async fn verify_handler(
     Json(payload): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, AppError> {
     if state.is_verification_paused() {
+        log_security_event(
+            SecurityEventType::LoginFailed,
+            None,
+            None,
+            None,
+            Some("Verification paused for emergency maintenance"),
+        );
         return Err(AppError::Internal(
             "Message verification is temporarily paused for emergency maintenance".into(),
         ));
     }
 
-    let subject = verify_challenge_envelope(&state, &payload.transaction)?;
-    let tokens = issue_token_pair(&state, &subject)?;
+    let subject = match verify_challenge_envelope(&state, &payload.transaction) {
+        Ok(s) => s,
+        Err(e) => {
+            log_security_event(
+                SecurityEventType::LoginFailed,
+                None,
+                None,
+                None,
+                Some(&e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+
+    let tokens = match issue_token_pair(&state, &subject) {
+        Ok(t) => t,
+        Err(e) => {
+            log_security_event(
+                SecurityEventType::LoginFailed,
+                Some(&subject),
+                None,
+                None,
+                Some(&e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+
+    log_security_event(
+        SecurityEventType::LoginSuccess,
+        Some(&subject),
+        None,
+        None,
+        Some("SEP-10 challenge verified and JWT issued"),
+    );
     
     crate::audit_log::log_audit_event(&subject, "auth_login", &subject);
 
@@ -780,21 +867,71 @@ pub async fn auth_middleware(
         ));
     }
 
-    let auth_header = req
+    let auth_header = match req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("Missing Authorization header".into()))?;
+    {
+        Some(h) => h,
+        None => {
+            log_security_event(
+                SecurityEventType::UnauthorizedAccess,
+                None,
+                None,
+                None,
+                Some("Missing Authorization header"),
+            );
+            return Err(AppError::Unauthorized("Missing Authorization header".into()));
+        }
+    };
 
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::Unauthorized("Expected Bearer token".into()))?;
+    let token = match auth_header.strip_prefix("Bearer ") {
+        Some(t) => t,
+        None => {
+            log_security_event(
+                SecurityEventType::UnauthorizedAccess,
+                None,
+                None,
+                None,
+                Some("Expected Bearer token"),
+            );
+            return Err(AppError::Unauthorized("Expected Bearer token".into()));
+        }
+    };
 
     let validation = Validation::new(Algorithm::RS256);
-    let token_data = decode::<Claims>(token, &state.decoding_key, &validation)
-        .map_err(|e| AppError::Unauthorized(format!("Invalid token: {e}")))?;
+    let token_data = match decode::<Claims>(token, &state.decoding_key, &validation) {
+        Ok(data) => data,
+        Err(e) => {
+            if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::ExpiredSignature) {
+                log_security_event(
+                    SecurityEventType::TokenExpired,
+                    None,
+                    None,
+                    None,
+                    Some("Access JWT expired"),
+                );
+            } else {
+                log_security_event(
+                    SecurityEventType::UnauthorizedAccess,
+                    None,
+                    None,
+                    None,
+                    Some(&format!("Invalid JWT: {e}")),
+                );
+            }
+            return Err(AppError::Unauthorized(format!("Invalid token: {e}")));
+        }
+    };
 
     if !token_data.claims.scopes.contains(&"simulate".to_string()) {
+        log_security_event(
+            SecurityEventType::UnauthorizedAccess,
+            Some(&token_data.claims.sub),
+            None,
+            None,
+            Some("Missing required scope 'simulate'"),
+        );
         return Err(AppError::Unauthorized(
             "Missing required scope 'simulate'".into(),
         ));
@@ -809,6 +946,13 @@ pub async fn auth_middleware(
             .or_insert_with(|| TokenBucket::new(RATE_LIMIT_CAPACITY));
 
         if !bucket.consume(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_RATE, 1.0) {
+            log_security_event(
+                SecurityEventType::UnauthorizedAccess,
+                Some(&tenant),
+                None,
+                None,
+                Some(&format!("Rate limit exceeded for tenant {}", tenant)),
+            );
             return Err(AppError::TooManyRequests(format!(
                 "Rate limit exceeded for tenant {}",
                 tenant

@@ -36,7 +36,18 @@ Owner-only. Clears the EmergencyGuard `STAKE` pause bit and restores stake, with
 
 `set_paused(paused) -> Result<(), ContractError>`
 
-Owner-only convenience wrapper. `true` calls `pause_staking`; `false` calls `resume_staking`.
+Owner-only. Sets or clears the EmergencyGuard `STAKE` pause bit. `pause_staking` and `resume_staking` call this.
+
+### Canonical guard API
+
+This contract standardizes on `DefaultEmergencyGuard` as the single source of truth for pause checks and state changes. The canonical calls are:
+
+- `DefaultEmergencyGuard::check_not_paused(&env, PauseType::STAKE)`
+- `DefaultEmergencyGuard::check_not_paused(&env, PauseType::CLAIM_REWARDS)`
+- `DefaultEmergencyGuard::set_pause_state(&env, PauseType::STAKE, paused)`
+- `DefaultEmergencyGuard::set_pause_state(&env, PauseType::CLAIM_REWARDS, paused)`
+
+Any direct calls to `EmergencyGuard::*` for these checks are intentionally avoided to keep the pause semantics consistent and auditable.
 
 ## Read API
 
@@ -70,7 +81,7 @@ Returns the full staking configuration.
 
 `resume_staking`: publishes `PausedEvent { paused: false }`.
 
-`set_paused`: delegates to `pause_staking` or `resume_staking` and publishes the corresponding event.
+`set_paused`: publishes `pause_staking` / `PausedEvent { paused: true }` or `resume_staking` / `PausedEvent { paused: false }`.
 
 ## Error Codes
 
